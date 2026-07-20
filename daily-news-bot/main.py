@@ -14,6 +14,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import feedparser
 import requests
+from opencc import OpenCC
 
 try:
     from newspaper import Article
@@ -21,11 +22,12 @@ except ImportError:  # 允许在缺少可选正文库时保留 RSS 内容
     Article = None
 
 RSS_SOURCES = {
-    "国内外要闻": [("新华社", "http://www.xinhuanet.com/politics/xhll.xml"), ("BBC中文", "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml")],
+    "国内外要闻": [("中新网", "https://www.chinanews.com.cn/rss/china.xml"), ("中新网滚动新闻", "https://www.chinanews.com.cn/rss/scroll-news.xml"), ("BBC中文", "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml")],
     "科技": [("36氪", "https://36kr.com/feed")],
-    "金融财经": [("新浪财经", "https://feed.mix.sina.com.cn/roll/rss")],
+    "金融财经": [("新浪财经", "https://feed.mix.sina.com.cn/roll/rss"), ("华尔街日报", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml")],
     "娱乐体育": [("新浪娱乐", "https://ent.sina.com.cn/rss/ent.xml")],
 }
+T2S_CONVERTER = OpenCC("t2s")
 HOT_URLS = {"微博热搜": "https://tenapi.cn/v2/weibohot", "小红书热搜": "https://tenapi.cn/v2/xiaohongshuhot"}
 SECTION_LIMITS = {"国内外要闻": 8, "科技": 4, "金融财经": 4, "娱乐体育": 4}
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
@@ -64,6 +66,17 @@ def plain_text(value: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", value or "")).strip()
 
 
+def to_simplified(value: str) -> str:
+    """将抓取到的繁体中文统一为简体，英文内容保持不变。"""
+    return T2S_CONVERTER.convert(value or "")
+
+
+def clean_editorial_title(value: str) -> str:
+    """只接受 AI 给出的中文标题，避免英文标题直接进入日报。"""
+    title = to_simplified(plain_text(value))
+    return title if re.search(r"[\u4e00-\u9fff]", title) else ""
+
+
 def canonical_url(url: str) -> str:
     parts = urlsplit(url)
     return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
@@ -78,12 +91,12 @@ def fetch_rss_sources(session: requests.Session) -> list[NewsItem]:
                 response.raise_for_status()
                 feed = feedparser.parse(response.content)
                 for entry in feed.entries:
-                    title, url = plain_text(entry.get("title", "")), entry.get("link", "").strip()
+                    title, url = to_simplified(plain_text(entry.get("title", ""))), entry.get("link", "").strip()
                     key = (title, canonical_url(url))
                     if not title or not url or key in seen:
                         continue
                     seen.add(key)
-                    items.append(NewsItem(title, source, url, plain_text(entry.get("summary", "")), "", section=section))
+                    items.append(NewsItem(title, source, url, to_simplified(plain_text(entry.get("summary", ""))), "", section=section))
                 logging.info("RSS 成功：%s，共 %d 条", source, len(feed.entries))
             except Exception as exc:  # noqa: BLE001 - 网络源必须隔离错误
                 logging.warning("RSS 抓取失败：%s，%s", source, exc)
@@ -97,7 +110,7 @@ def extract_article(item: NewsItem) -> NewsItem:
         article = Article(item.url, language="zh")
         article.download()
         article.parse()
-        item.content = plain_text(article.text)
+        item.content = to_simplified(plain_text(article.text))
     except Exception as exc:  # noqa: BLE001
         logging.warning("正文提取失败：%s，%s", item.title, exc)
     return item
@@ -181,13 +194,16 @@ def fallback_text(item: NewsItem) -> tuple[str, str]:
 
 
 def ai_enrich(sections: dict[str, list[NewsItem]], session: requests.Session, api_key: str) -> None:
-    instruction = "你是严谨的中文报纸编辑。仅依据输入正文，输出 JSON：summary 为50至80字，article 为300至500字。语言平实客观，不用网络用语，不编造，删除广告和无关内容。"
+    instruction = "你是严谨的中文报纸编辑。仅依据输入正文，输出 JSON：title 为忠实的简体中文标题，summary 为50至80字，article 为300至500字。语言平实客观，不用网络用语，不编造，删除广告和无关内容。"
     for items in sections.values():
         for item in items:
             payload = {"title": item.title, "source": item.source, "description": item.description, "content": item.content or item.description}
             result = call_deepseek(session, [{"role": "system", "content": instruction}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], api_key)
             summary = plain_text(str(result.get("summary", ""))) if result else ""
             article = plain_text(str(result.get("article", ""))) if result else ""
+            title = clean_editorial_title(str(result.get("title", ""))) if result else ""
+            if title:
+                item.title = title
             if not (50 <= len(summary) <= 80 and 300 <= len(article) <= 500):
                 summary, article = fallback_text(item)
             item.summary, item.article = summary, article
