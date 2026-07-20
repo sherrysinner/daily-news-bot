@@ -282,35 +282,66 @@ def build_hot_words(weibo_words: list[str], xiaohongshu_words: list[str]) -> dic
     }
 
 
+def normalize_article_paragraphs(value: str) -> str:
+    """保留段落边界，避免网页把整篇整理文本挤成一行。"""
+    paragraphs = [re.sub(r"\s+", " ", part).strip() for part in re.split(r"\n\s*\n", value or "")]
+    paragraphs = [part for part in paragraphs if part]
+    return "\n\n".join(paragraphs)
+
+
+def is_valid_summary(value: str) -> bool:
+    text = plain_text(value)
+    return 50 <= len(text) <= 80 and text.endswith(("。", "！", "？"))
+
+
+def is_valid_article(value: str) -> bool:
+    article = normalize_article_paragraphs(value)
+    paragraphs = article.split("\n\n") if article else []
+    return 300 <= len("".join(paragraphs)) <= 500 and 3 <= len(paragraphs) <= 5
+
+
+def editorial_fields(result: dict[str, Any] | None) -> tuple[str, str, str]:
+    if not result:
+        return "", "", ""
+    return (
+        clean_editorial_title(str(result.get("title", ""))),
+        plain_text(str(result.get("summary", ""))),
+        normalize_article_paragraphs(str(result.get("article", ""))),
+    )
+
+
 def fallback_text(item: NewsItem) -> tuple[str, str]:
+    """AI 连续失败时保留来源事实，不用截断文本伪装成完整摘要。"""
     raw = plain_text(item.description or item.content or item.title)
-    summary = raw[:80]
-    if len(summary) < 50:
-        summary = (summary + "（详情请以新闻原文为准。）")[:80]
-    article = plain_text(item.content or item.description or item.title)[:500]
-    if len(article) < 300:
-        article = (article + " 本文根据新闻来源已公开的标题、简介及可获取正文整理，仅保留可核实的事实信息。请点击原文链接查看完整报道。")[:500]
+    summary = "该新闻暂未生成符合格式的摘要，请点击原文查看完整报道。"
+    article = normalize_article_paragraphs(raw)
     return summary, article
 
 
 def ai_enrich(sections: dict[str, list[NewsItem]], session: requests.Session, api_key: str) -> None:
-    instruction = "你是严谨的中文报纸编辑。仅依据输入正文，输出 JSON：title 为忠实的简体中文标题，summary 为50至80字，article 为300至500字。语言平实客观，不用网络用语，不编造，删除广告和无关内容。"
+    instruction = """你是严谨的中文报纸编辑。仅依据输入事实输出 JSON 对象，包含 title、summary、article。
+summary 必须是50至80个汉字左右的独立完整事实句，说明谁、发生了什么以及必要影响，以句号、问号或感叹号结束；绝不能复制原文开头、使用省略号或写成不完整短语。
+article 必须为300至500个汉字、3至5个自然段；各段之间用两个换行符（\\n\\n）分隔。只保留可核实事实，删除广告和无关内容，不编造，不使用网络用语。"""
+    repair_instruction = "请修复上一份 JSON：摘要必须是50至80字的完整句，正文必须为300至500字且有3至5段，用\\n\\n分段。只返回 JSON，不得补充输入中没有的事实。"
     for items in sections.values():
         for item in items:
             payload = {"title": item.title, "source": item.source, "description": item.description, "content": item.content or item.description}
-            result = call_deepseek(session, [{"role": "system", "content": instruction}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], api_key)
-            summary = plain_text(str(result.get("summary", ""))) if result else ""
-            article = plain_text(str(result.get("article", ""))) if result else ""
-            title = clean_editorial_title(str(result.get("title", ""))) if result else ""
+            messages = [{"role": "system", "content": instruction}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+            title, summary, article = editorial_fields(call_deepseek(session, messages, api_key))
+            if not (is_valid_summary(summary) and is_valid_article(article)):
+                repair_messages = [
+                    {"role": "system", "content": repair_instruction},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ]
+                title, summary, article = editorial_fields(call_deepseek(session, repair_messages, api_key))
             if title:
                 item.title = title
-            if summary and article:
-                item.summary, item.article = summary[:80], article[:500]
+            if is_valid_summary(summary) and is_valid_article(article):
+                item.summary, item.article = summary, article
                 logging.info("AI 整理成功：%s", item.title)
             else:
-                summary, article = fallback_text(item)
-                item.summary, item.article = summary, article
-                logging.warning("AI 整理回退：%s", item.title)
+                item.summary, item.article = fallback_text(item)
+                logging.warning("AI 整理降级：%s，摘要或正文未通过质量校验", item.title)
 
 
 def render_html(date_text: str, sections: dict[str, list[NewsItem]], hot_words: dict[str, list[str]], page_url: str) -> str:
@@ -323,7 +354,7 @@ def render_html(date_text: str, sections: dict[str, list[NewsItem]], hot_words: 
             if is_displayable_image(item.image_url, seen_images):
                 seen_images.add(item.image_url)
                 image = f'<img class="news-image" src="{html.escape(item.image_url, quote=True)}" alt="新闻配图" loading="lazy">'
-            paragraphs = "".join(f"<p>{html.escape(part)}</p>" for part in re.split(r"\n\s*\n|(?<=。)\s*", item.article) if part.strip())
+            paragraphs = "".join(f"<p>{html.escape(part)}</p>" for part in normalize_article_paragraphs(item.article).split("\n\n") if part.strip())
             cards.append(f'<article id="news-{number}">{image}<h3>{html.escape(item.title)}</h3><p class="meta">来源：{html.escape(item.source)}</p><p>{html.escape(item.summary)}</p><details><summary>点击展开新闻整理</summary>{paragraphs}<p><a href="{html.escape(item.url, quote=True)}" target="_blank" rel="noopener">阅读原文</a></p></details></article>')
         blocks.append(f"<section><h2>{section}</h2>{''.join(cards) or '<p>今日暂未获取到合适新闻。</p>'}</section>")
     hot = "".join(f"<h3>{html.escape(name)}</h3><p>{'　'.join(html.escape(x) for x in words) or '暂无数据'}</p>" for name, words in hot_words.items())

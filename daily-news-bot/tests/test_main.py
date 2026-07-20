@@ -7,6 +7,9 @@ from main import (
     clean_editorial_title,
     fetch_newsnow_hot_words,
     fetch_newsnow_platform,
+    is_valid_article,
+    is_valid_summary,
+    normalize_article_paragraphs,
     render_html,
     split_markdown,
     to_simplified,
@@ -112,3 +115,18 @@ def test_html_shows_a_duplicate_image_only_once():
     second = NewsItem("乙", "中新网", "https://example.test/2", "", "", image_url="https://img.example/a.jpg", section="国内外要闻")
     page = render_html("2026-07-21", {"国内外要闻": [first, second]}, {}, "https://example.test")
     assert page.count('class="news-image"') == 1
+
+
+def test_summary_must_be_a_complete_sentence_between_fifty_and_eighty_characters():
+    complete = "有关部门发布新政策，明确了实施范围、执行时间和配套措施，相关地区将根据实际情况稳妥推进，政策重点在于改善公共服务并保障群众便利。"
+    assert is_valid_summary(complete)
+    assert not is_valid_summary("有关部门发布新政策，明确了实施范围")
+
+
+def test_article_normalization_keeps_three_paragraphs_for_html():
+    article = normalize_article_paragraphs("第一段事实。\n\n第二段背景。\n\n第三段影响。")
+    assert article.count("\n\n") == 2
+    assert not is_valid_article(article)
+    item = NewsItem("标题", "来源", "https://example.test", "", "", summary="有关部门发布新政策，明确了实施范围、执行时间和配套措施，相关地区将根据实际情况稳妥推进，政策重点在于改善公共服务并保障群众便利。", article=article, section="国内外要闻")
+    page = render_html("2026-07-21", {"国内外要闻": [item]}, {}, "https://example.test")
+    assert "<p>第一段事实。</p><p>第二段背景。</p><p>第三段影响。</p>" in page
