@@ -1,4 +1,14 @@
-from main import RSS_SOURCES, WALLSTREETCN_URL, NewsItem, clean_editorial_title, render_html, split_markdown, to_simplified
+from main import (
+    RSS_SOURCES,
+    WALLSTREETCN_URL,
+    NewsItem,
+    clean_editorial_title,
+    fetch_newsnow_hot_words,
+    fetch_newsnow_platform,
+    render_html,
+    split_markdown,
+    to_simplified,
+)
 
 
 def test_html_escapes_content_and_has_collapsible_article():
@@ -46,3 +56,38 @@ def test_traditional_characters_are_converted_to_simplified():
 def test_editorial_title_requires_chinese_text():
     assert clean_editorial_title("华尔街日报关注全球市场") == "华尔街日报关注全球市场"
     assert clean_editorial_title("Stocks rally") == ""
+
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self.payload
+
+
+class FakeSession:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def get(self, *_args, **_kwargs):
+        return FakeResponse(self.payload)
+
+
+def test_newsnow_converts_wallstreetcn_items_to_finance_news():
+    session = FakeSession({"status": "success", "items": [{"title": "市场早报", "url": "https://wallstreetcn.com/articles/1", "mobileUrl": ""}]})
+    items = fetch_newsnow_platform(session, "wallstreetcn-hot", "华尔街见闻", "wallstreetcn.com", "金融财经")
+    assert [(item.title, item.source, item.section) for item in items] == [("市场早报", "华尔街见闻", "金融财经")]
+
+
+def test_newsnow_rejects_an_item_from_an_unexpected_domain():
+    session = FakeSession({"status": "success", "items": [{"title": "错误链接", "url": "https://evil.example/a", "mobileUrl": ""}]})
+    assert fetch_newsnow_platform(session, "weibo", "微博", "weibo.com", "") == []
+
+
+def test_newsnow_weibo_hot_words_uses_the_first_five_titles():
+    rows = [{"title": f"热词{i}", "url": "https://s.weibo.com/weibo?q=x", "mobileUrl": ""} for i in range(8)]
+    assert fetch_newsnow_hot_words(FakeSession({"status": "success", "items": rows}), "weibo") == ["热词0", "热词1", "热词2", "热词3", "热词4"]

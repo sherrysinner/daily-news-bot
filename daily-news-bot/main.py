@@ -33,6 +33,7 @@ HOT_URLS = {"微博热搜": "https://tenapi.cn/v2/weibohot", "小红书热搜": 
 SECTION_LIMITS = {"国内外要闻": 8, "科技": 4, "金融财经": 4, "娱乐体育": 4}
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 WALLSTREETCN_URL = "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=30"
+NEWSNOW_DEFAULT_BASE_URL = "https://newsnow.busiyi.world/api/s"
 
 
 @dataclass
@@ -116,6 +117,60 @@ def fetch_wallstreetcn(session: requests.Session) -> list[NewsItem]:
     except Exception as exc:  # noqa: BLE001
         logging.warning("华尔街见闻抓取失败：%s", exc)
         return []
+
+
+def newsnow_base_url() -> str:
+    """读取可选的自建 NewsNow 地址，未配置时使用公开实例。"""
+    return os.getenv("NEWSNOW_BASE_URL", NEWSNOW_DEFAULT_BASE_URL).strip().rstrip("/") or NEWSNOW_DEFAULT_BASE_URL
+
+
+def fetch_newsnow_payload(session: requests.Session, platform_id: str) -> list[dict[str, Any]]:
+    response = session.get(
+        newsnow_base_url(),
+        params={"id": platform_id, "latest": ""},
+        timeout=20,
+        headers={"User-Agent": "daily-news-bot/1.0", "Accept": "application/json"},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict) or payload.get("status") not in {"success", "cache"}:
+        raise ValueError(f"NewsNow 返回状态异常：{payload.get('status') if isinstance(payload, dict) else '无效响应'}")
+    items = payload.get("items", [])
+    return items if isinstance(items, list) else []
+
+
+def is_expected_url(url: str, expected_domain: str) -> bool:
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    domain = expected_domain.lower()
+    return parsed.scheme == "https" and (host == domain or host.endswith(f".{domain}"))
+
+
+def fetch_newsnow_platform(
+    session: requests.Session,
+    platform_id: str,
+    source: str,
+    expected_domain: str,
+    section: str,
+) -> list[NewsItem]:
+    """读取 NewsNow 单个平台数据，并阻止非预期域名链接进入日报。"""
+    try:
+        items = []
+        for row in fetch_newsnow_payload(session, platform_id):
+            title = to_simplified(plain_text(str(row.get("title", "")))) if isinstance(row, dict) else ""
+            url = str(row.get("mobileUrl") or row.get("url") or "").strip() if isinstance(row, dict) else ""
+            if title and is_expected_url(url, expected_domain):
+                items.append(NewsItem(title, source, url, title, title, section=section))
+        logging.info("NewsNow 成功：%s，共 %d 条", source, len(items))
+        return items
+    except Exception as exc:  # noqa: BLE001 - 单个平台失败不能中断日报
+        logging.warning("NewsNow 抓取失败：%s，%s", source, exc)
+        return []
+
+
+def fetch_newsnow_hot_words(session: requests.Session, platform_id: str) -> list[str]:
+    """从 NewsNow 读取微博等热榜标题，最多保留五条。"""
+    return [item.title for item in fetch_newsnow_platform(session, platform_id, "微博", "weibo.com", "")[:5]]
 
 
 def extract_article(item: NewsItem) -> NewsItem:
