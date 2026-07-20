@@ -71,6 +71,12 @@ def to_simplified(value: str) -> str:
     return T2S_CONVERTER.convert(value or "")
 
 
+def clean_editorial_title(value: str) -> str:
+    """只接受 AI 给出的中文标题，避免英文标题直接进入日报。"""
+    title = to_simplified(plain_text(value))
+    return title if re.search(r"[\u4e00-\u9fff]", title) else ""
+
+
 def canonical_url(url: str) -> str:
     parts = urlsplit(url)
     return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
@@ -188,13 +194,16 @@ def fallback_text(item: NewsItem) -> tuple[str, str]:
 
 
 def ai_enrich(sections: dict[str, list[NewsItem]], session: requests.Session, api_key: str) -> None:
-    instruction = "你是严谨的中文报纸编辑。仅依据输入正文，输出 JSON：summary 为50至80字，article 为300至500字。语言平实客观，不用网络用语，不编造，删除广告和无关内容。"
+    instruction = "你是严谨的中文报纸编辑。仅依据输入正文，输出 JSON：title 为忠实的简体中文标题，summary 为50至80字，article 为300至500字。语言平实客观，不用网络用语，不编造，删除广告和无关内容。"
     for items in sections.values():
         for item in items:
             payload = {"title": item.title, "source": item.source, "description": item.description, "content": item.content or item.description}
             result = call_deepseek(session, [{"role": "system", "content": instruction}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}], api_key)
             summary = plain_text(str(result.get("summary", ""))) if result else ""
             article = plain_text(str(result.get("article", ""))) if result else ""
+            title = clean_editorial_title(str(result.get("title", ""))) if result else ""
+            if title:
+                item.title = title
             if not (50 <= len(summary) <= 80 and 300 <= len(article) <= 500):
                 summary, article = fallback_text(item)
             item.summary, item.article = summary, article

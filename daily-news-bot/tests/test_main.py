@@ -1,4 +1,4 @@
-from main import RSS_SOURCES, NewsItem, render_html, split_markdown, to_simplified
+from main import RSS_SOURCES, NewsItem, clean_editorial_title, render_html, split_markdown, to_simplified
 
 
 def test_html_escapes_content_and_has_collapsible_article():
@@ -34,3 +34,8 @@ def test_sources_replace_dead_xinhua_and_add_wsj_markets_feed():
 
 def test_traditional_characters_are_converted_to_simplified():
     assert to_simplified("華爾街日報關注經濟發展") == "华尔街日报关注经济发展"
+
+
+def test_editorial_title_requires_chinese_text():
+    assert clean_editorial_title("华尔街日报关注全球市场") == "华尔街日报关注全球市场"
+    assert clean_editorial_title("Stocks rally") == ""
