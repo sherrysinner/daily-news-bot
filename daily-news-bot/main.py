@@ -24,8 +24,8 @@ except ImportError:  # 允许在缺少可选正文库时保留 RSS 内容
 RSS_SOURCES = {
     "国内外要闻": [("中新网", "https://www.chinanews.com.cn/rss/china.xml"), ("中新网滚动新闻", "https://www.chinanews.com.cn/rss/scroll-news.xml"), ("BBC中文", "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml")],
     "科技": [("36氪", "https://36kr.com/feed")],
-    "金融财经": [("新浪财经", "https://feed.mix.sina.com.cn/roll/rss"), ("华尔街日报", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml")],
-    "娱乐体育": [("新浪娱乐", "https://ent.sina.com.cn/rss/ent.xml")],
+    "金融财经": [("中新网财经", "https://www.chinanews.com.cn/rss/finance.xml"), ("华尔街日报", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml")],
+    "娱乐体育": [("中新网文娱", "https://www.chinanews.com.cn/rss/culture.xml"), ("中新网体育", "https://www.chinanews.com.cn/rss/sports.xml")],
 }
 T2S_CONVERTER = OpenCC("t2s")
 HOT_URLS = {"微博热搜": "https://tenapi.cn/v2/weibohot", "小红书热搜": "https://tenapi.cn/v2/xiaohongshuhot"}
@@ -43,6 +43,7 @@ class NewsItem:
     summary: str = ""
     article: str = ""
     section: str = ""
+    image_url: str = ""
 
 
 @dataclass
@@ -96,7 +97,9 @@ def fetch_rss_sources(session: requests.Session) -> list[NewsItem]:
                     if not title or not url or key in seen:
                         continue
                     seen.add(key)
-                    items.append(NewsItem(title, source, url, to_simplified(plain_text(entry.get("summary", ""))), "", section=section))
+                    media = entry.get("media_content", []) or entry.get("media_thumbnail", []) or entry.get("enclosures", [])
+                    image_url = media[0].get("url", "") if media and isinstance(media[0], dict) else ""
+                    items.append(NewsItem(title, source, url, to_simplified(plain_text(entry.get("summary", ""))), "", image_url=image_url, section=section))
                 logging.info("RSS 成功：%s，共 %d 条", source, len(feed.entries))
             except Exception as exc:  # noqa: BLE001 - 网络源必须隔离错误
                 logging.warning("RSS 抓取失败：%s，%s", source, exc)
@@ -104,13 +107,15 @@ def fetch_rss_sources(session: requests.Session) -> list[NewsItem]:
 
 
 def extract_article(item: NewsItem) -> NewsItem:
-    if Article is None:
+    if Article is None or item.source == "华尔街日报":
         return item
     try:
         article = Article(item.url, language="zh")
         article.download()
         article.parse()
         item.content = to_simplified(plain_text(article.text))
+        if not item.image_url:
+            item.image_url = article.top_image or ""
     except Exception as exc:  # noqa: BLE001
         logging.warning("正文提取失败：%s，%s", item.title, exc)
     return item
@@ -183,11 +188,11 @@ def ai_select(items: list[NewsItem], session: requests.Session, api_key: str) ->
 
 
 def fallback_text(item: NewsItem) -> tuple[str, str]:
-    raw = plain_text(item.content or item.description or item.title)
+    raw = plain_text(item.description or item.content or item.title)
     summary = raw[:80]
     if len(summary) < 50:
         summary = (summary + "（详情请以新闻原文为准。）")[:80]
-    article = raw[:500]
+    article = plain_text(item.content or item.description or item.title)[:500]
     if len(article) < 300:
         article = (article + " 本文根据新闻来源已公开的标题、简介及可获取正文整理，仅保留可核实的事实信息。请点击原文链接查看完整报道。")[:500]
     return summary, article
@@ -215,10 +220,11 @@ def render_html(date_text: str, sections: dict[str, list[NewsItem]], hot_words: 
         cards = []
         for item in sections.get(section, []):
             number += 1
-            cards.append(f'<article id="news-{number}"><h3>{html.escape(item.title)}</h3><p class="meta">来源：{html.escape(item.source)}</p><p>{html.escape(item.summary)}</p><details><summary>点击展开新闻整理</summary><p>{html.escape(item.article)}</p><p><a href="{html.escape(item.url, quote=True)}" target="_blank" rel="noopener">阅读原文</a></p></details></article>')
+            image = f'<img class="news-image" src="{html.escape(item.image_url, quote=True)}" alt="新闻配图" loading="lazy">' if item.image_url.startswith(("http://", "https://")) else ""
+            cards.append(f'<article id="news-{number}">{image}<h3>{html.escape(item.title)}</h3><p class="meta">来源：{html.escape(item.source)}</p><p>{html.escape(item.summary)}</p><details><summary>点击展开新闻整理</summary><p>{html.escape(item.article)}</p><p><a href="{html.escape(item.url, quote=True)}" target="_blank" rel="noopener">阅读原文</a></p></details></article>')
         blocks.append(f"<section><h2>{section}</h2>{''.join(cards) or '<p>今日暂未获取到合适新闻。</p>'}</section>")
     hot = "".join(f"<h3>{html.escape(name)}</h3><p>{'　'.join(html.escape(x) for x in words) or '暂无数据'}</p>" for name, words in hot_words.items())
-    return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>今日新闻杂志 {date_text}</title><style>body{{margin:0;background:#f6f5f1;color:#272727;font:17px/1.75 system-ui,"Microsoft YaHei",sans-serif}}main{{max-width:760px;margin:auto;padding:18px}}header,section,footer{{background:#fff;border-radius:12px;padding:18px;margin:14px 0;box-shadow:0 1px 4px #ddd}}h1{{font-size:27px;margin:0}}h2{{font-size:22px;border-left:5px solid #a6412e;padding-left:10px}}h3{{font-size:19px;margin-bottom:4px}}article{{border-top:1px solid #e8e4dc;padding:12px 0}}.meta{{color:#666;font-size:15px}}summary{{color:#8b3828;font-weight:600;cursor:pointer}}a{{color:#8b3828}}details p{{white-space:pre-wrap}}footer{{font-size:15px;color:#555}}</style><main><header><h1>今日新闻杂志</h1><p>{html.escape(date_text)}</p></header>{''.join(blocks)}<section><h2>今日热搜</h2>{hot}</section><footer>新闻内容由公开 RSS 与原文整理而成，供阅读参考；请以原始报道为准。网页版入口：{html.escape(page_url)}</footer></main></html>'''
+    return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>今日新闻杂志 {date_text}</title><style>body{{margin:0;background:#f6f5f1;color:#272727;font:17px/1.75 system-ui,"Microsoft YaHei",sans-serif}}main{{max-width:760px;margin:auto;padding:18px}}header,section,footer{{background:#fff;border-radius:12px;padding:18px;margin:14px 0;box-shadow:0 1px 4px #ddd}}h1{{font-size:27px;margin:0}}h2{{font-size:22px;border-left:5px solid #a6412e;padding-left:10px}}h3{{font-size:19px;margin-bottom:4px}}article{{border-top:1px solid #e8e4dc;padding:12px 0}}.news-image{{width:100%;max-height:280px;object-fit:cover;border-radius:8px}}.meta{{color:#666;font-size:15px}}summary{{color:#8b3828;font-weight:600;cursor:pointer}}a{{color:#8b3828}}details p{{white-space:pre-wrap}}footer{{font-size:15px;color:#555}}</style><main><header><h1>今日新闻杂志</h1><p>{html.escape(date_text)}</p></header>{''.join(blocks)}<section><h2>今日热搜</h2>{hot}</section><footer>新闻内容由公开 RSS 与原文整理而成，供阅读参考；请以原始报道为准。网页版入口：{html.escape(page_url)}</footer></main></html>'''
 
 
 def split_markdown(text: str, limit: int = 4096) -> list[str]:
