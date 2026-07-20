@@ -82,6 +82,16 @@ class FakeSession:
         return FakeResponse(self.payload)
 
 
+class RecordingSession(FakeSession):
+    def __init__(self, payload):
+        super().__init__(payload)
+        self.request_kwargs = {}
+
+    def get(self, *_args, **kwargs):
+        self.request_kwargs = kwargs
+        return FakeResponse(self.payload)
+
+
 def test_newsnow_converts_wallstreetcn_items_to_finance_news():
     session = FakeSession({"status": "success", "items": [{"title": "市场早报", "url": "https://wallstreetcn.com/articles/1", "mobileUrl": ""}]})
     items = fetch_newsnow_platform(session, "wallstreetcn-hot", "华尔街见闻", "wallstreetcn.com", "金融财经")
@@ -96,6 +106,12 @@ def test_newsnow_rejects_an_item_from_an_unexpected_domain():
 def test_newsnow_weibo_hot_words_uses_the_first_five_titles():
     rows = [{"title": f"热词{i}", "url": "https://s.weibo.com/weibo?q=x", "mobileUrl": ""} for i in range(8)]
     assert fetch_newsnow_hot_words(FakeSession({"status": "success", "items": rows}), "weibo") == ["热词0", "热词1", "热词2", "热词3", "热词4"]
+
+
+def test_newsnow_uses_a_browser_compatible_request_header():
+    session = RecordingSession({"status": "success", "items": []})
+    fetch_newsnow_platform(session, "weibo", "微博", "weibo.com", "")
+    assert session.request_kwargs["headers"]["User-Agent"].startswith("Mozilla/")
 
 
 def test_source_limit_keeps_at_most_three_items_per_source_in_one_section():

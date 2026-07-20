@@ -129,7 +129,11 @@ def fetch_newsnow_payload(session: requests.Session, platform_id: str) -> list[d
         newsnow_base_url(),
         params={"id": platform_id, "latest": ""},
         timeout=20,
-        headers={"User-Agent": "daily-news-bot/1.0", "Accept": "application/json"},
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
     )
     response.raise_for_status()
     payload = response.json()
