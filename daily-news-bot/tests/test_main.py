@@ -1,4 +1,4 @@
-from main import RSS_SOURCES, NewsItem, clean_editorial_title, render_html, split_markdown, to_simplified
+from main import RSS_SOURCES, WALLSTREETCN_URL, NewsItem, clean_editorial_title, render_html, split_markdown, to_simplified
 
 
 def test_html_escapes_content_and_has_collapsible_article():
@@ -24,13 +24,13 @@ def test_markdown_is_split_below_wechat_limit():
     assert all(len(part) <= 4096 for part in parts)
 
 
-def test_sources_replace_dead_xinhua_and_add_wsj_markets_feed():
+def test_sources_replace_dead_xinhua_and_use_wallstreetcn_feed():
     domestic_urls = [url for _, url in RSS_SOURCES["国内外要闻"]]
     finance_urls = [url for _, url in RSS_SOURCES["金融财经"]]
     assert "http://www.xinhuanet.com/politics/xhll.xml" not in domestic_urls
     assert "https://www.chinanews.com.cn/rss/china.xml" in domestic_urls
-    assert "https://feeds.a.dj.com/rss/RSSMarketsMain.xml" in finance_urls
     assert "https://www.chinanews.com.cn/rss/finance.xml" in finance_urls
+    assert "api-one.wallstcn.com" in WALLSTREETCN_URL
 
 
 def test_html_shows_image_only_when_a_news_image_exists():

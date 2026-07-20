@@ -23,15 +23,16 @@ except ImportError:  # 允许在缺少可选正文库时保留 RSS 内容
     Article = None
 
 RSS_SOURCES = {
-    "国内外要闻": [("中新网", "https://www.chinanews.com.cn/rss/china.xml"), ("中新网滚动新闻", "https://www.chinanews.com.cn/rss/scroll-news.xml"), ("BBC中文", "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml")],
+    "国内外要闻": [("中新网国内", "https://www.chinanews.com.cn/rss/china.xml"), ("中新网国际", "https://www.chinanews.com.cn/rss/world.xml"), ("BBC中文", "https://feeds.bbci.co.uk/zhongwen/simp/rss.xml")],
     "科技": [("36氪", "https://36kr.com/feed")],
-    "金融财经": [("中新网财经", "https://www.chinanews.com.cn/rss/finance.xml"), ("华尔街日报", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml")],
+    "金融财经": [("中新网财经", "https://www.chinanews.com.cn/rss/finance.xml")],
     "娱乐体育": [("中新网文娱", "https://www.chinanews.com.cn/rss/culture.xml"), ("中新网体育", "https://www.chinanews.com.cn/rss/sports.xml")],
 }
 T2S_CONVERTER = OpenCC("t2s")
 HOT_URLS = {"微博热搜": "https://tenapi.cn/v2/weibohot", "小红书热搜": "https://tenapi.cn/v2/xiaohongshuhot"}
 SECTION_LIMITS = {"国内外要闻": 8, "科技": 4, "金融财经": 4, "娱乐体育": 4}
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+WALLSTREETCN_URL = "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=30"
 
 
 @dataclass
@@ -107,6 +108,16 @@ def fetch_rss_sources(session: requests.Session) -> list[NewsItem]:
     return items
 
 
+def fetch_wallstreetcn(session: requests.Session) -> list[NewsItem]:
+    """抓取华尔街见闻公开实时财经流。"""
+    try:
+        rows = session.get(WALLSTREETCN_URL, timeout=20, headers={"User-Agent": "Mozilla/5.0"}).json()["data"]["items"]
+        return [NewsItem(to_simplified(plain_text(row.get("title", ""))), "华尔街见闻", row.get("uri", "https://wallstreetcn.com"), to_simplified(plain_text(row.get("content_text", ""))), to_simplified(plain_text(row.get("content_text", ""))), section="金融财经") for row in rows if row.get("title")][:20]
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("华尔街见闻抓取失败：%s", exc)
+        return []
+
+
 def extract_article(item: NewsItem) -> NewsItem:
     if Article is None or item.source == "华尔街日报":
         return item
@@ -159,9 +170,11 @@ def fetch_hot_words(session: requests.Session, url: str) -> list[str]:
 
 def fallback_select(items: list[NewsItem]) -> dict[str, list[NewsItem]]:
     result = {name: [] for name in SECTION_LIMITS}
+    sources = {name: set() for name in SECTION_LIMITS}
     for item in items:
-        if item.section in result and len(result[item.section]) < SECTION_LIMITS[item.section]:
+        if item.section in result and len(result[item.section]) < SECTION_LIMITS[item.section] and (item.source in sources[item.section] or len(sources[item.section]) < 3):
             result[item.section].append(item)
+            sources[item.section].add(item.source)
     return result
 
 
@@ -241,7 +254,8 @@ def render_html(date_text: str, sections: dict[str, list[NewsItem]], hot_words: 
         for item in sections.get(section, []):
             number += 1
             image = f'<img class="news-image" src="{html.escape(item.image_url, quote=True)}" alt="新闻配图" loading="lazy">' if item.image_url.startswith(("http://", "https://")) else ""
-            cards.append(f'<article id="news-{number}">{image}<h3>{html.escape(item.title)}</h3><p class="meta">来源：{html.escape(item.source)}</p><p>{html.escape(item.summary)}</p><details><summary>点击展开新闻整理</summary><p>{html.escape(item.article)}</p><p><a href="{html.escape(item.url, quote=True)}" target="_blank" rel="noopener">阅读原文</a></p></details></article>')
+            paragraphs = "".join(f"<p>{html.escape(part)}</p>" for part in re.split(r"\n\s*\n|(?<=。)\s*", item.article) if part.strip())
+            cards.append(f'<article id="news-{number}">{image}<h3>{html.escape(item.title)}</h3><p class="meta">来源：{html.escape(item.source)}</p><p>{html.escape(item.summary)}</p><details><summary>点击展开新闻整理</summary>{paragraphs}<p><a href="{html.escape(item.url, quote=True)}" target="_blank" rel="noopener">阅读原文</a></p></details></article>')
         blocks.append(f"<section><h2>{section}</h2>{''.join(cards) or '<p>今日暂未获取到合适新闻。</p>'}</section>")
     hot = "".join(f"<h3>{html.escape(name)}</h3><p>{'　'.join(html.escape(x) for x in words) or '暂无数据'}</p>" for name, words in hot_words.items())
     return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>今日新闻杂志 {date_text}</title><style>body{{margin:0;background:#f6f5f1;color:#272727;font:17px/1.75 system-ui,"Microsoft YaHei",sans-serif}}main{{max-width:760px;margin:auto;padding:18px}}header,section,footer{{background:#fff;border-radius:12px;padding:18px;margin:14px 0;box-shadow:0 1px 4px #ddd}}h1{{font-size:27px;margin:0}}h2{{font-size:22px;border-left:5px solid #a6412e;padding-left:10px}}h3{{font-size:19px;margin-bottom:4px}}article{{border-top:1px solid #e8e4dc;padding:12px 0}}.news-image{{width:100%;max-height:280px;object-fit:cover;border-radius:8px}}.meta{{color:#666;font-size:15px}}summary{{color:#8b3828;font-weight:600;cursor:pointer}}a{{color:#8b3828}}details p{{white-space:pre-wrap}}footer{{font-size:15px;color:#555}}</style><main><header><h1>今日新闻杂志</h1><p>{html.escape(date_text)}</p></header>{''.join(blocks)}<section><h2>今日热搜</h2>{hot}</section><footer>新闻内容由公开 RSS 与原文整理而成，供阅读参考；请以原始报道为准。网页版入口：{html.escape(page_url)}</footer></main></html>'''
@@ -295,7 +309,7 @@ def main() -> None:
         return
     session = requests.Session()
     today = date.today().isoformat()
-    items = [enrich_image_from_metadata(extract_article(item)) for item in fetch_rss_sources(session)]
+    items = [extract_article(item) for item in fetch_rss_sources(session)] + fetch_wallstreetcn(session)
     sections = ai_select(items, session, config.deepseek_api_key)
     ai_enrich(sections, session, config.deepseek_api_key)
     hot_words = {name: fetch_hot_words(session, url) for name, url in HOT_URLS.items()}
