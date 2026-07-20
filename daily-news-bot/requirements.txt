@@ -1,0 +1,5 @@
+feedparser==6.0.12
+requests==2.34.2
+newspaper3k==0.2.8
+lxml_html_clean==0.4.5
+pytest==9.1.1
