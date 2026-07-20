@@ -2,6 +2,8 @@ from main import (
     RSS_SOURCES,
     WALLSTREETCN_URL,
     NewsItem,
+    apply_source_limits,
+    build_hot_words,
     clean_editorial_title,
     fetch_newsnow_hot_words,
     fetch_newsnow_platform,
@@ -91,3 +93,15 @@ def test_newsnow_rejects_an_item_from_an_unexpected_domain():
 def test_newsnow_weibo_hot_words_uses_the_first_five_titles():
     rows = [{"title": f"热词{i}", "url": "https://s.weibo.com/weibo?q=x", "mobileUrl": ""} for i in range(8)]
     assert fetch_newsnow_hot_words(FakeSession({"status": "success", "items": rows}), "weibo") == ["热词0", "热词1", "热词2", "热词3", "热词4"]
+
+
+def test_source_limit_keeps_at_most_three_items_per_source_in_one_section():
+    items = [NewsItem(f"标题{i}", "中新网", f"https://example.test/{i}", "", "", section="金融财经") for i in range(4)]
+    items.append(NewsItem("财联社标题", "财联社", "https://www.cls.cn/detail/1", "", "", section="金融财经"))
+    selected = apply_source_limits({"金融财经": items})
+    assert [item.source for item in selected["金融财经"]].count("中新网") == 3
+    assert selected["金融财经"][-1].source == "财联社"
+
+
+def test_hot_words_marks_missing_xiaohongshu_data_in_chinese():
+    assert build_hot_words(["热词一"], []) == {"微博热搜": ["热词一"], "小红书热搜": ["今日未获取到小红书热搜"]}

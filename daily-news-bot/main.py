@@ -31,6 +31,7 @@ RSS_SOURCES = {
 T2S_CONVERTER = OpenCC("t2s")
 HOT_URLS = {"微博热搜": "https://tenapi.cn/v2/weibohot", "小红书热搜": "https://tenapi.cn/v2/xiaohongshuhot"}
 SECTION_LIMITS = {"国内外要闻": 8, "科技": 4, "金融财经": 4, "娱乐体育": 4}
+MAX_ITEMS_PER_SOURCE = 3
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 WALLSTREETCN_URL = "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=30"
 NEWSNOW_DEFAULT_BASE_URL = "https://newsnow.busiyi.world/api/s"
@@ -223,14 +224,27 @@ def fetch_hot_words(session: requests.Session, url: str) -> list[str]:
         return []
 
 
+def apply_source_limits(sections: dict[str, list[NewsItem]]) -> dict[str, list[NewsItem]]:
+    """避免一个来源占满同一板块，优先保留先被筛选出的候选。"""
+    limited = {name: [] for name in SECTION_LIMITS}
+    for section, items in sections.items():
+        if section not in limited:
+            continue
+        counts: dict[str, int] = {}
+        for item in items:
+            if len(limited[section]) >= SECTION_LIMITS[section] or counts.get(item.source, 0) >= MAX_ITEMS_PER_SOURCE:
+                continue
+            limited[section].append(item)
+            counts[item.source] = counts.get(item.source, 0) + 1
+    return limited
+
+
 def fallback_select(items: list[NewsItem]) -> dict[str, list[NewsItem]]:
     result = {name: [] for name in SECTION_LIMITS}
-    sources = {name: set() for name in SECTION_LIMITS}
     for item in items:
-        if item.section in result and len(result[item.section]) < SECTION_LIMITS[item.section] and (item.source in sources[item.section] or len(sources[item.section]) < 3):
+        if item.section in result and len(result[item.section]) < SECTION_LIMITS[item.section]:
             result[item.section].append(item)
-            sources[item.section].add(item.source)
-    return result
+    return apply_source_limits(result)
 
 
 def parse_json_object(text: str) -> dict[str, Any] | None:
@@ -268,7 +282,15 @@ def ai_select(items: list[NewsItem], session: requests.Session, api_key: str) ->
             if item and item not in selected[section] and len(selected[section]) < limit:
                 item.section = section
                 selected[section].append(item)
-    return selected if any(selected.values()) else fallback_select(items)
+    return apply_source_limits(selected) if any(selected.values()) else fallback_select(items)
+
+
+def build_hot_words(weibo_words: list[str], xiaohongshu_words: list[str]) -> dict[str, list[str]]:
+    """为不可用热搜来源保留清晰说明，避免页面无故留白。"""
+    return {
+        "微博热搜": weibo_words[:5] or ["今日未获取到微博热搜"],
+        "小红书热搜": xiaohongshu_words[:5] or ["今日未获取到小红书热搜"],
+    }
 
 
 def fallback_text(item: NewsItem) -> tuple[str, str]:
@@ -364,10 +386,13 @@ def main() -> None:
         return
     session = requests.Session()
     today = date.today().isoformat()
-    items = [extract_article(item) for item in fetch_rss_sources(session)] + fetch_wallstreetcn(session)
+    rss_items = [extract_article(item) for item in fetch_rss_sources(session)]
+    finance_items = fetch_newsnow_platform(session, "wallstreetcn-hot", "华尔街见闻", "wallstreetcn.com", "金融财经")
+    finance_items += fetch_newsnow_platform(session, "cls-hot", "财联社", "cls.cn", "金融财经")
+    items = rss_items + finance_items
     sections = ai_select(items, session, config.deepseek_api_key)
     ai_enrich(sections, session, config.deepseek_api_key)
-    hot_words = {name: fetch_hot_words(session, url) for name, url in HOT_URLS.items()}
+    hot_words = build_hot_words(fetch_newsnow_hot_words(session, "weibo"), [])
     output = Path(__file__).resolve().parent / "news"
     output.mkdir(exist_ok=True)
     (output / f"{today}.html").write_text(render_html(today, sections, hot_words, config.page_url), encoding="utf-8")
