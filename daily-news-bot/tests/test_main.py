@@ -1,15 +1,20 @@
+import main as main_module
+
 from main import (
     RSS_SOURCES,
     WALLSTREETCN_URL,
     NewsItem,
     apply_source_limits,
+    ai_enrich,
     build_hot_words,
     clean_editorial_title,
+    fill_section_gaps,
     fetch_newsnow_hot_words,
     fetch_newsnow_platform,
     is_valid_article,
     is_valid_summary,
     normalize_article_paragraphs,
+    paragraphize_article,
     render_html,
     split_markdown,
     to_simplified,
@@ -146,3 +151,37 @@ def test_article_normalization_keeps_three_paragraphs_for_html():
     item = NewsItem("标题", "来源", "https://example.test", "", "", summary="有关部门发布新政策，明确了实施范围、执行时间和配套措施，相关地区将根据实际情况稳妥推进，政策重点在于改善公共服务并保障群众便利。", article=article, section="国内外要闻")
     page = render_html("2026-07-21", {"国内外要闻": [item]}, {}, "https://example.test")
     assert "<p>第一段事实。</p><p>第二段背景。</p><p>第三段影响。</p>" in page
+
+
+def test_section_gaps_are_filled_from_original_candidates():
+    chosen = {name: [] for name in RSS_SOURCES}
+    chosen["金融财经"] = [NewsItem("已选", "来源甲", "https://example.test/selected", "", "", section="金融财经")]
+    candidates = {
+        "金融财经": [
+            NewsItem("已选", "来源甲", "https://example.test/selected", "", "", section="金融财经"),
+            NewsItem("候选一", "来源乙", "https://example.test/one", "", "", section="金融财经"),
+            NewsItem("候选二", "来源丙", "https://example.test/two", "", "", section="金融财经"),
+            NewsItem("候选三", "来源丁", "https://example.test/three", "", "", section="金融财经"),
+        ]
+    }
+    result = fill_section_gaps(chosen, candidates)
+    assert [item.title for item in result["金融财经"]] == ["已选", "候选一", "候选二", "候选三"]
+
+
+def test_article_is_split_into_three_paragraphs_when_ai_omits_breaks():
+    article = paragraphize_article("第一句。第二句。第三句。第四句。第五句。第六句。")
+    assert article.count("\n\n") == 2
+    assert article.split("\n\n") == ["第一句。第二句。", "第三句。第四句。", "第五句。第六句。"]
+
+
+def test_ai_retries_only_the_summary_and_keeps_a_paragraphized_article(monkeypatch):
+    complete_summary = "有关部门发布新政策，明确了实施范围、执行时间和配套措施，相关地区将根据实际情况稳妥推进，政策重点在于改善公共服务并保障群众便利。"
+    responses = iter([
+        {"title": "测试标题", "summary": "过短摘要。", "article": "第一句。第二句。第三句。第四句。第五句。第六句。"},
+        {"summary": complete_summary},
+    ])
+    monkeypatch.setattr(main_module, "call_deepseek", lambda *_args, **_kwargs: next(responses))
+    item = NewsItem("原标题", "测试来源", "https://example.test/news", "简介", "正文", section="国内外要闻")
+    ai_enrich({"国内外要闻": [item]}, object(), "test-key")
+    assert item.summary == complete_summary
+    assert item.article.count("\n\n") == 2
