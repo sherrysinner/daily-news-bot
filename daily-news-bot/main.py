@@ -15,6 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 import feedparser
 import requests
 from opencc import OpenCC
+from bs4 import BeautifulSoup
 
 try:
     from newspaper import Article
@@ -121,6 +122,21 @@ def extract_article(item: NewsItem) -> NewsItem:
     return item
 
 
+def enrich_image_from_metadata(item: NewsItem) -> NewsItem:
+    """新闻源未在 RSS 提供图片时，读取网页开放图谱首图。"""
+    if item.image_url or item.source == "华尔街日报":
+        return item
+    try:
+        response = requests.get(item.url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(response.text, "html.parser")
+        image = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "twitter:image"})
+        if image and image.get("content", "").startswith(("http://", "https://")):
+            item.image_url = image["content"]
+    except Exception as exc:  # noqa: BLE001
+        logging.info("配图提取失败：%s，%s", item.title, exc)
+    return item
+
+
 def fetch_hot_words(session: requests.Session, url: str) -> list[str]:
     try:
         data = session.get(url, timeout=15, headers={"User-Agent": "daily-news-bot/1.0"}).json()
@@ -209,9 +225,13 @@ def ai_enrich(sections: dict[str, list[NewsItem]], session: requests.Session, ap
             title = clean_editorial_title(str(result.get("title", ""))) if result else ""
             if title:
                 item.title = title
-            if not (50 <= len(summary) <= 80 and 300 <= len(article) <= 500):
+            if summary and article:
+                item.summary, item.article = summary[:80], article[:500]
+                logging.info("AI 整理成功：%s", item.title)
+            else:
                 summary, article = fallback_text(item)
-            item.summary, item.article = summary, article
+                item.summary, item.article = summary, article
+                logging.warning("AI 整理回退：%s", item.title)
 
 
 def render_html(date_text: str, sections: dict[str, list[NewsItem]], hot_words: dict[str, list[str]], page_url: str) -> str:
@@ -275,7 +295,7 @@ def main() -> None:
         return
     session = requests.Session()
     today = date.today().isoformat()
-    items = [extract_article(item) for item in fetch_rss_sources(session)]
+    items = [enrich_image_from_metadata(extract_article(item)) for item in fetch_rss_sources(session)]
     sections = ai_select(items, session, config.deepseek_api_key)
     ai_enrich(sections, session, config.deepseek_api_key)
     hot_words = {name: fetch_hot_words(session, url) for name, url in HOT_URLS.items()}
