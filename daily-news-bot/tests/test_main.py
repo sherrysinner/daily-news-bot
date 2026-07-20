@@ -105,3 +105,10 @@ def test_source_limit_keeps_at_most_three_items_per_source_in_one_section():
 
 def test_hot_words_marks_missing_xiaohongshu_data_in_chinese():
     assert build_hot_words(["热词一"], []) == {"微博热搜": ["热词一"], "小红书热搜": ["今日未获取到小红书热搜"]}
+
+
+def test_html_shows_a_duplicate_image_only_once():
+    first = NewsItem("甲", "中新网", "https://example.test/1", "", "", image_url="https://img.example/a.jpg", section="国内外要闻")
+    second = NewsItem("乙", "中新网", "https://example.test/2", "", "", image_url="https://img.example/a.jpg", section="国内外要闻")
+    page = render_html("2026-07-21", {"国内外要闻": [first, second]}, {}, "https://example.test")
+    assert page.count('class="news-image"') == 1

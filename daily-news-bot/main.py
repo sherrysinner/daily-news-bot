@@ -15,7 +15,6 @@ from urllib.parse import urlsplit, urlunsplit
 import feedparser
 import requests
 from opencc import OpenCC
-from bs4 import BeautifulSoup
 
 try:
     from newspaper import Article
@@ -182,26 +181,16 @@ def extract_article(item: NewsItem) -> NewsItem:
         article.download()
         article.parse()
         item.content = to_simplified(plain_text(article.text))
-        if not item.image_url:
+        if item.content and not item.image_url:
             item.image_url = article.top_image or ""
     except Exception as exc:  # noqa: BLE001
         logging.warning("正文提取失败：%s，%s", item.title, exc)
     return item
 
 
-def enrich_image_from_metadata(item: NewsItem) -> NewsItem:
-    """新闻源未在 RSS 提供图片时，读取网页开放图谱首图。"""
-    if item.image_url or item.source == "华尔街日报":
-        return item
-    try:
-        response = requests.get(item.url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        soup = BeautifulSoup(response.text, "html.parser")
-        image = soup.find("meta", property="og:image") or soup.find("meta", attrs={"name": "twitter:image"})
-        if image and image.get("content", "").startswith(("http://", "https://")):
-            item.image_url = image["content"]
-    except Exception as exc:  # noqa: BLE001
-        logging.info("配图提取失败：%s，%s", item.title, exc)
-    return item
+def is_displayable_image(url: str, seen_images: set[str]) -> bool:
+    """通用站点占位图容易重复或与新闻无关，重复图片不再展示。"""
+    return url.startswith(("http://", "https://")) and url not in seen_images
 
 
 def fetch_hot_words(session: requests.Session, url: str) -> list[str]:
@@ -325,12 +314,15 @@ def ai_enrich(sections: dict[str, list[NewsItem]], session: requests.Session, ap
 
 
 def render_html(date_text: str, sections: dict[str, list[NewsItem]], hot_words: dict[str, list[str]], page_url: str) -> str:
-    blocks, number = [], 0
+    blocks, number, seen_images = [], 0, set()
     for section in SECTION_LIMITS:
         cards = []
         for item in sections.get(section, []):
             number += 1
-            image = f'<img class="news-image" src="{html.escape(item.image_url, quote=True)}" alt="新闻配图" loading="lazy">' if item.image_url.startswith(("http://", "https://")) else ""
+            image = ""
+            if is_displayable_image(item.image_url, seen_images):
+                seen_images.add(item.image_url)
+                image = f'<img class="news-image" src="{html.escape(item.image_url, quote=True)}" alt="新闻配图" loading="lazy">'
             paragraphs = "".join(f"<p>{html.escape(part)}</p>" for part in re.split(r"\n\s*\n|(?<=。)\s*", item.article) if part.strip())
             cards.append(f'<article id="news-{number}">{image}<h3>{html.escape(item.title)}</h3><p class="meta">来源：{html.escape(item.source)}</p><p>{html.escape(item.summary)}</p><details><summary>点击展开新闻整理</summary>{paragraphs}<p><a href="{html.escape(item.url, quote=True)}" target="_blank" rel="noopener">阅读原文</a></p></details></article>')
         blocks.append(f"<section><h2>{section}</h2>{''.join(cards) or '<p>今日暂未获取到合适新闻。</p>'}</section>")
