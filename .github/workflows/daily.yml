@@ -1,4 +1,4 @@
-name: 每日新闻推送
+name: Daily news delivery
 
 on:
   schedule:
@@ -21,27 +21,27 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: 获取代码
+      - name: Checkout
         uses: actions/checkout@v4
-      - name: 配置 Pages
+      - name: Configure Pages
         uses: actions/configure-pages@v5
-      - name: 配置 Python 3.11
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: 安装依赖
+      - name: Install dependencies
         run: pip install -r daily-news-bot/requirements.txt
-      - name: 生成并推送日报
+      - name: Build and send daily news
         working-directory: daily-news-bot
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           WECHAT_WEBHOOK_URL: ${{ secrets.WECHAT_WEBHOOK_URL }}
           PAGE_URL: ${{ secrets.PAGE_URL }}
         run: python main.py
-      - name: 上传静态日报
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: daily-news-bot
-      - name: 部署到 GitHub Pages
+      - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
