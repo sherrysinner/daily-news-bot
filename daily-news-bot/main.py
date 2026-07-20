@@ -232,6 +232,28 @@ def apply_source_limits(sections: dict[str, list[NewsItem]]) -> dict[str, list[N
     return limited
 
 
+def fill_section_gaps(
+    selected: dict[str, list[NewsItem]], candidates_by_section: dict[str, list[NewsItem]],
+) -> dict[str, list[NewsItem]]:
+    """AI 第一轮少选时，以原始候选补足板块，不突破来源上限。"""
+    completed = apply_source_limits(selected)
+    for section, limit in SECTION_LIMITS.items():
+        seen_urls = {item.url for item in completed[section]}
+        source_counts: dict[str, int] = {}
+        for item in completed[section]:
+            source_counts[item.source] = source_counts.get(item.source, 0) + 1
+        for item in candidates_by_section.get(section, []):
+            if len(completed[section]) >= limit:
+                break
+            if item.url in seen_urls or source_counts.get(item.source, 0) >= MAX_ITEMS_PER_SOURCE:
+                continue
+            item.section = section
+            completed[section].append(item)
+            seen_urls.add(item.url)
+            source_counts[item.source] = source_counts.get(item.source, 0) + 1
+    return completed
+
+
 def fallback_select(items: list[NewsItem]) -> dict[str, list[NewsItem]]:
     result = {name: [] for name in SECTION_LIMITS}
     for item in items:
@@ -260,11 +282,12 @@ def call_deepseek(session: requests.Session, messages: list[dict[str, str]], api
 
 def ai_select(items: list[NewsItem], session: requests.Session, api_key: str) -> dict[str, list[NewsItem]]:
     index = {item.url: item for item in items}
+    candidates_by_section = {section: [item for item in items if item.section == section] for section in SECTION_LIMITS}
     catalogue = [{"title": i.title, "source": i.source, "url": i.url, "description": i.description, "suggested_section": i.section} for i in items]
     prompt = """你是严谨的中文报纸编辑。按国内外要闻、科技、金融财经、娱乐体育筛选新闻；过滤标题党、无实质内容和传播健康焦虑的信息。只根据输入，不得编造。返回 JSON 对象，键为四个板块，值为输入中 url 组成的数组。国内外要闻最多8条，其余最多4条。"""
     result = call_deepseek(session, [{"role": "system", "content": prompt}, {"role": "user", "content": json.dumps(catalogue, ensure_ascii=False)}], api_key)
     if not result:
-        return fallback_select(items)
+        return fill_section_gaps(fallback_select(items), candidates_by_section)
     selected = {name: [] for name in SECTION_LIMITS}
     for section, limit in SECTION_LIMITS.items():
         urls = result.get(section, [])
@@ -275,7 +298,7 @@ def ai_select(items: list[NewsItem], session: requests.Session, api_key: str) ->
             if item and item not in selected[section] and len(selected[section]) < limit:
                 item.section = section
                 selected[section].append(item)
-    return apply_source_limits(selected) if any(selected.values()) else fallback_select(items)
+    return fill_section_gaps(selected, candidates_by_section) if any(selected.values()) else fallback_select(items)
 
 
 def build_hot_words(weibo_words: list[str], xiaohongshu_words: list[str]) -> dict[str, list[str]]:
@@ -290,6 +313,24 @@ def normalize_article_paragraphs(value: str) -> str:
     """保留段落边界，避免网页把整篇整理文本挤成一行。"""
     paragraphs = [re.sub(r"\s+", " ", part).strip() for part in re.split(r"\n\s*\n", value or "")]
     paragraphs = [part for part in paragraphs if part]
+    return "\n\n".join(paragraphs)
+
+
+def paragraphize_article(value: str) -> str:
+    """AI 忘记换段时，按完整句平均分为三段，保留原有事实顺序。"""
+    normalized = normalize_article_paragraphs(value)
+    if len(normalized.split("\n\n")) >= 3:
+        return normalized
+    sentences = [part.strip() for part in re.split(r"(?<=[。！？])", plain_text(value)) if part.strip()]
+    if len(sentences) < 3:
+        return normalized
+    paragraph_count = min(5, max(3, min(len(sentences), 3)))
+    base_size, remainder = divmod(len(sentences), paragraph_count)
+    paragraphs, cursor = [], 0
+    for index in range(paragraph_count):
+        size = base_size + (1 if index < remainder else 0)
+        paragraphs.append("".join(sentences[cursor : cursor + size]))
+        cursor += size
     return "\n\n".join(paragraphs)
 
 
@@ -310,7 +351,7 @@ def editorial_fields(result: dict[str, Any] | None) -> tuple[str, str, str]:
     return (
         clean_editorial_title(str(result.get("title", ""))),
         plain_text(str(result.get("summary", ""))),
-        normalize_article_paragraphs(str(result.get("article", ""))),
+        paragraphize_article(str(result.get("article", ""))),
     )
 
 
@@ -326,26 +367,34 @@ def ai_enrich(sections: dict[str, list[NewsItem]], session: requests.Session, ap
     instruction = """你是严谨的中文报纸编辑。仅依据输入事实输出 JSON 对象，包含 title、summary、article。
 summary 必须是50至80个汉字左右的独立完整事实句，说明谁、发生了什么以及必要影响，以句号、问号或感叹号结束；绝不能复制原文开头、使用省略号或写成不完整短语。
 article 必须为300至500个汉字、3至5个自然段；各段之间用两个换行符（\\n\\n）分隔。只保留可核实事实，删除广告和无关内容，不编造，不使用网络用语。"""
-    repair_instruction = "请修复上一份 JSON：摘要必须是50至80字的完整句，正文必须为300至500字且有3至5段，用\\n\\n分段。只返回 JSON，不得补充输入中没有的事实。"
+    repair_summary_instruction = "只输出 JSON 对象中的 summary 字段。请依据输入事实重写为50至80字的独立完整中文摘要，须说明主体和事件，并以句号、问号或感叹号结束；不写省略号，不补充输入没有的事实。"
     for items in sections.values():
         for item in items:
             payload = {"title": item.title, "source": item.source, "description": item.description, "content": item.content or item.description}
             messages = [{"role": "system", "content": instruction}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
             title, summary, article = editorial_fields(call_deepseek(session, messages, api_key))
-            if not (is_valid_summary(summary) and is_valid_article(article)):
+            if not is_valid_summary(summary):
                 repair_messages = [
-                    {"role": "system", "content": repair_instruction},
+                    {"role": "system", "content": repair_summary_instruction},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ]
-                title, summary, article = editorial_fields(call_deepseek(session, repair_messages, api_key))
+                repaired_title, repaired_summary, _ = editorial_fields(call_deepseek(session, repair_messages, api_key))
+                if repaired_title:
+                    title = repaired_title
+                if is_valid_summary(repaired_summary):
+                    summary = repaired_summary
             if title:
                 item.title = title
-            if is_valid_summary(summary) and is_valid_article(article):
-                item.summary, item.article = summary, article
-                logging.info("AI 整理成功：%s", item.title)
+            fallback_summary, fallback_article = fallback_text(item)
+            item.summary = summary if is_valid_summary(summary) else fallback_summary
+            item.article = article or fallback_article
+            if is_valid_summary(summary):
+                if is_valid_article(article):
+                    logging.info("AI 整理成功：%s", item.title)
+                else:
+                    logging.info("AI 整理完成：%s，正文未达建议长度但已保留并分段", item.title)
             else:
-                item.summary, item.article = fallback_text(item)
-                logging.warning("AI 整理降级：%s，摘要或正文未通过质量校验", item.title)
+                logging.warning("AI 摘要降级：%s，摘要未通过质量校验", item.title)
 
 
 def render_html(date_text: str, sections: dict[str, list[NewsItem]], hot_words: dict[str, list[str]], page_url: str) -> str:
