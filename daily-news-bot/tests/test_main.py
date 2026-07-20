@@ -30,6 +30,13 @@ def test_sources_replace_dead_xinhua_and_add_wsj_markets_feed():
     assert "http://www.xinhuanet.com/politics/xhll.xml" not in domestic_urls
     assert "https://www.chinanews.com.cn/rss/china.xml" in domestic_urls
     assert "https://feeds.a.dj.com/rss/RSSMarketsMain.xml" in finance_urls
+    assert "https://www.chinanews.com.cn/rss/finance.xml" in finance_urls
+
+
+def test_html_shows_image_only_when_a_news_image_exists():
+    item = NewsItem("标题", "来源", "https://example.test", "简介", "正文", image_url="https://example.test/a.jpg", section="国内外要闻")
+    html = render_html("2026-07-20", {"国内外要闻": [item]}, {}, "https://example.test")
+    assert 'class="news-image"' in html
 
 
 def test_traditional_characters_are_converted_to_simplified():
