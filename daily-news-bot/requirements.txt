@@ -4,3 +4,4 @@ newspaper3k==0.2.8
 lxml_html_clean==0.4.5
 opencc-python-reimplemented==0.1.7
 pytest==9.1.1
+Pillow==12.2.0

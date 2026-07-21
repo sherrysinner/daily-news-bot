@@ -1,21 +1,27 @@
 import main as main_module
 
 from datetime import datetime, timezone
+from io import BytesIO
+
+from PIL import Image
 
 from main import (
     RSS_SOURCES,
     WALLSTREETCN_URL,
     NewsItem,
+    HotTopic,
     apply_source_limits,
     ai_enrich,
     build_hot_words,
     clean_editorial_title,
     cache_article_image,
+    cache_article_images,
     beijing_today,
     build_wechat_messages,
     fallback_text,
     fill_section_gaps,
     fetch_newsnow_hot_words,
+    fetch_newsnow_hot_topics,
     fetch_newsnow_platform,
     is_valid_article,
     is_valid_summary,
@@ -119,6 +125,12 @@ def test_newsnow_weibo_hot_words_uses_the_first_five_titles():
     assert fetch_newsnow_hot_words(FakeSession({"status": "success", "items": rows}), "weibo") == ["热词0", "热词1", "热词2", "热词3", "热词4"]
 
 
+def test_newsnow_hot_topics_keep_the_weibo_search_link_and_honest_description():
+    rows = [{"title": "热词一", "url": "https://s.weibo.com/weibo?q=热词一", "mobileUrl": ""}]
+    topics = fetch_newsnow_hot_topics(FakeSession({"status": "success", "items": rows}), "weibo")
+    assert topics == [HotTopic("热词一", "https://s.weibo.com/weibo?q=热词一", "点击查看微博实时讨论")]
+
+
 def test_newsnow_uses_a_browser_compatible_request_header():
     session = RecordingSession({"status": "success", "items": []})
     fetch_newsnow_platform(session, "weibo", "微博", "weibo.com", "")
@@ -152,7 +164,12 @@ def test_chinanews_image_is_not_used_when_it_may_be_a_generic_rss_image(tmp_path
 
 class ImageResponse:
     headers = {"Content-Type": "image/jpeg"}
-    content = b"real-image-bytes"
+
+    def __init__(self):
+        image = Image.new("RGB", (20, 20), "#884422")
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG")
+        self.content = buffer.getvalue()
 
     def raise_for_status(self):
         return None
@@ -163,11 +180,38 @@ class ImageSession:
         return ImageResponse()
 
 
+class MultiImageSession:
+    def __init__(self):
+        image = Image.new("RGB", (1800, 1200), "#884422")
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=95)
+        self.content = buffer.getvalue()
+
+    def get(self, *_args, **_kwargs):
+        response = ImageResponse()
+        response.content = self.content
+        return response
+
+
 def test_article_image_is_cached_beside_daily_html(tmp_path):
     item = NewsItem("标题", "36氪", "https://36kr.com/p/1", "", "", image_url="https://img.example/a.jpg")
     cache_article_image(ImageSession(), item, tmp_path)
     assert item.image_url.startswith("images/")
     assert (tmp_path / item.image_url.removeprefix("images/")).is_file()
+
+
+def test_article_can_cache_at_most_two_compressed_images(tmp_path):
+    item = NewsItem("标题", "36氪", "https://36kr.com/p/1", "", "", image_urls=["https://img.example/a.jpg", "https://img.example/b.jpg", "https://img.example/c.jpg"])
+    cache_article_images(MultiImageSession(), item, tmp_path)
+    assert len(item.image_urls) == 2
+    assert all(url.startswith("images/") for url in item.image_urls)
+    assert all((tmp_path / url.removeprefix("images/")).stat().st_size <= 300 * 1024 for url in item.image_urls)
+
+
+def test_html_renders_two_images_for_one_news_item():
+    item = NewsItem("标题", "36氪", "https://36kr.com/p/1", "", "", image_urls=["images/a.jpg", "images/b.jpg"], section="国内外要闻")
+    page = render_html("2026-07-21", {"国内外要闻": [item]}, {}, "https://example.test")
+    assert page.count('class="news-image"') == 2
 
 
 def test_short_complete_summary_is_kept_when_ai_strict_length_check_fails(monkeypatch):
@@ -193,6 +237,15 @@ def test_hot_words_are_rendered_as_numbered_rows_in_html_and_wechat():
     messages = build_wechat_messages("2026-07-21", {}, hot, "https://example.test")
     assert "<ol class=\"hot-list\"><li>热词一</li><li>热词二</li></ol>" in page
     assert "1. 热词一\n2. 热词二" in "\n".join(messages)
+
+
+def test_hot_topic_has_a_clickable_expandable_detail_in_html_and_wechat():
+    topic = HotTopic("热词一", "https://s.weibo.com/weibo?q=x", "点击查看微博实时讨论")
+    page = render_html("2026-07-21", {}, {"微博热搜": [topic]}, "https://example.test")
+    messages = build_wechat_messages("2026-07-21", {}, {"微博热搜": [topic]}, "https://example.test")
+    assert 'href="https://s.weibo.com/weibo?q=x"' in page
+    assert "点击查看微博实时讨论" in page
+    assert "[热词一](https://s.weibo.com/weibo?q=x)" in "\n".join(messages)
 
 
 def test_daily_date_uses_beijing_timezone():
