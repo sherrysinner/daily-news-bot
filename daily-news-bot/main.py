@@ -197,8 +197,13 @@ def fetch_newsnow_hot_words(session: requests.Session, platform_id: str) -> list
     return [item.title for item in fetch_newsnow_platform(session, platform_id, "微博", "weibo.com", "")[:5]]
 
 
-def fetch_newsnow_hot_topics(session: requests.Session, platform_id: str) -> list[HotTopic]:
-    """保留微博热词的搜索链接；公开源没有正文时不凭关键词编造梗概。"""
+def fetch_newsnow_hot_topics(
+    session: requests.Session,
+    platform_id: str,
+    expected_domain: str = "weibo.com",
+    description: str = "点击查看微博实时讨论",
+) -> list[HotTopic]:
+    """保留热词搜索链接；公开源没有正文时不凭关键词编造梗概。"""
     try:
         topics = []
         for row in fetch_newsnow_payload(session, platform_id):
@@ -206,8 +211,8 @@ def fetch_newsnow_hot_topics(session: requests.Session, platform_id: str) -> lis
                 continue
             title = to_simplified(plain_text(str(row.get("title", ""))))
             url = str(row.get("mobileUrl") or row.get("url") or "").strip()
-            if title and is_expected_url(url, "weibo.com"):
-                topics.append(HotTopic(title, url, "点击查看微博实时讨论"))
+            if title and is_expected_url(url, expected_domain):
+                topics.append(HotTopic(title, url, description))
             if len(topics) == 5:
                 break
         return topics
@@ -256,7 +261,11 @@ def cache_one_image(session: requests.Session, item: NewsItem, image_dir: Path, 
         content = response.content
         if not content or len(content) > 5 * 1024 * 1024:
             raise ValueError("不是可保存的新闻图片")
+        if any(word in image_url.lower() for word in ("logo", "icon", "avatar", "qrcode", "advert")):
+            raise ValueError("非正文配图")
         image = Image.open(BytesIO(content)).convert("RGB")
+        if min(image.size) < 160 or max(image.size) / min(image.size) > 4:
+            raise ValueError("图片尺寸不适合作为新闻配图")
         image.thumbnail((1200, 900))
         output = BytesIO()
         for quality in (82, 74, 66, 58):
@@ -405,7 +414,7 @@ def build_hot_words(weibo_words: list[str], xiaohongshu_words: list[str]) -> dic
 def build_hot_topics(weibo_topics: list[HotTopic], xiaohongshu_words: list[str]) -> dict[str, list[HotTopic | str]]:
     return {
         "微博热搜": weibo_topics or ["今日未获取到微博热搜"],
-        "小红书热搜": xiaohongshu_words[:5] or ["今日未获取到小红书热搜"],
+        "B站热搜": xiaohongshu_words[:5] or ["今日未获取到B站热搜"],
     }
 
 
@@ -529,13 +538,19 @@ def render_html(date_text: str, sections: dict[str, list[NewsItem]], hot_words: 
         cards = []
         for item in sections.get(section, []):
             number += 1
-            image = ""
+            paragraphs = "".join(f"<p>{html.escape(part)}</p>" for part in normalize_article_paragraphs(item.article).split("\n\n") if part.strip())
+            inline_images = []
             for image_url in (item.image_urls or [item.image_url]):
                 if is_displayable_image(image_url, seen_images):
                     seen_images.add(image_url)
-                    image += f'<img class="news-image" src="{html.escape(image_url, quote=True)}" alt="新闻配图" loading="lazy">'
-            paragraphs = "".join(f"<p>{html.escape(part)}</p>" for part in normalize_article_paragraphs(item.article).split("\n\n") if part.strip())
-            cards.append(f'<article id="news-{number}">{image}<h3>{html.escape(item.title)}</h3><p class="meta">来源：{html.escape(item.source)}</p><p>{html.escape(item.summary)}</p><details><summary>点击展开新闻整理</summary>{paragraphs}<p><a href="{html.escape(item.url, quote=True)}" target="_blank" rel="noopener">阅读原文</a></p></details></article>')
+                    inline_images.append(f'<img class="news-image" src="{html.escape(image_url, quote=True)}" alt="新闻原文配图" loading="lazy">')
+            paragraph_parts = [f"<p>{html.escape(part)}</p>" for part in normalize_article_paragraphs(item.article).split("\n\n") if part.strip()]
+            content_parts = []
+            for index, paragraph in enumerate(paragraph_parts):
+                content_parts.append(paragraph)
+                if index < len(inline_images):
+                    content_parts.append(inline_images[index])
+            cards.append(f'<article id="news-{number}"><h3>{html.escape(item.title)}</h3><p class="meta">来源：{html.escape(item.source)}</p><p>{html.escape(item.summary)}</p><details><summary>点击展开新闻整理</summary>{"".join(content_parts)}<p><a href="{html.escape(item.url, quote=True)}" target="_blank" rel="noopener">阅读原文</a></p></details></article>')
         blocks.append(f"<section><h2>{section}</h2>{''.join(cards) or '<p>今日暂未获取到合适新闻。</p>'}</section>")
     hot = "".join(
         f"<h3>{html.escape(name)}</h3><ol class=\"hot-list\">"
@@ -607,7 +622,10 @@ def main() -> None:
     items = rss_items + finance_items
     sections = ai_select(items, session, config.deepseek_api_key)
     ai_enrich(sections, session, config.deepseek_api_key)
-    hot_words = build_hot_topics(fetch_newsnow_hot_topics(session, "weibo"), fetch_hot_words(session, HOT_URLS["小红书热搜"]))
+    hot_words = build_hot_topics(
+        fetch_newsnow_hot_topics(session, "weibo"),
+        fetch_newsnow_hot_topics(session, "bilibili-hot-search", "bilibili.com", "点击查看B站实时讨论"),
+    )
     output = Path(__file__).resolve().parent / "news"
     output.mkdir(exist_ok=True)
     image_dir = output / "images"

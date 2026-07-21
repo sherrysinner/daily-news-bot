@@ -66,7 +66,7 @@ def test_sources_replace_dead_xinhua_and_use_wallstreetcn_feed():
 
 
 def test_html_shows_image_only_when_a_news_image_exists():
-    item = NewsItem("标题", "来源", "https://example.test", "简介", "正文", image_url="https://example.test/a.jpg", section="国内外要闻")
+    item = NewsItem("标题", "来源", "https://example.test", "简介", "正文", article="正文第一段。", image_url="https://example.test/a.jpg", section="国内外要闻")
     html = render_html("2026-07-20", {"国内外要闻": [item]}, {}, "https://example.test")
     assert 'class="news-image"' in html
 
@@ -131,6 +131,12 @@ def test_newsnow_hot_topics_keep_the_weibo_search_link_and_honest_description():
     assert topics == [HotTopic("热词一", "https://s.weibo.com/weibo?q=热词一", "点击查看微博实时讨论")]
 
 
+def test_newsnow_bilibili_hot_topics_keep_the_bilibili_search_link():
+    rows = [{"title": "B站热词", "url": "https://search.bilibili.com/all?keyword=x"}]
+    topics = fetch_newsnow_hot_topics(FakeSession({"status": "success", "items": rows}), "bilibili-hot-search", "bilibili.com", "点击查看B站实时讨论")
+    assert topics == [HotTopic("B站热词", "https://search.bilibili.com/all?keyword=x", "点击查看B站实时讨论")]
+
+
 def test_newsnow_uses_a_browser_compatible_request_header():
     session = RecordingSession({"status": "success", "items": []})
     fetch_newsnow_platform(session, "weibo", "微博", "weibo.com", "")
@@ -150,8 +156,8 @@ def test_hot_words_marks_missing_xiaohongshu_data_in_chinese():
 
 
 def test_html_shows_a_duplicate_image_only_once():
-    first = NewsItem("甲", "中新网", "https://example.test/1", "", "", image_url="https://img.example/a.jpg", section="国内外要闻")
-    second = NewsItem("乙", "中新网", "https://example.test/2", "", "", image_url="https://img.example/a.jpg", section="国内外要闻")
+    first = NewsItem("甲", "中新网", "https://example.test/1", "", "", article="第一段。", image_url="https://img.example/a.jpg", section="国内外要闻")
+    second = NewsItem("乙", "中新网", "https://example.test/2", "", "", article="第一段。", image_url="https://img.example/a.jpg", section="国内外要闻")
     page = render_html("2026-07-21", {"国内外要闻": [first, second]}, {}, "https://example.test")
     assert page.count('class="news-image"') == 1
 
@@ -166,7 +172,7 @@ class ImageResponse:
     headers = {"Content-Type": "image/jpeg"}
 
     def __init__(self):
-        image = Image.new("RGB", (20, 20), "#884422")
+        image = Image.new("RGB", (200, 200), "#884422")
         buffer = BytesIO()
         image.save(buffer, format="JPEG")
         self.content = buffer.getvalue()
@@ -209,9 +215,17 @@ def test_article_can_cache_at_most_two_compressed_images(tmp_path):
 
 
 def test_html_renders_two_images_for_one_news_item():
-    item = NewsItem("标题", "36氪", "https://36kr.com/p/1", "", "", image_urls=["images/a.jpg", "images/b.jpg"], section="国内外要闻")
+    item = NewsItem("标题", "36氪", "https://36kr.com/p/1", "", "", article="第一段。\n\n第二段。", image_urls=["images/a.jpg", "images/b.jpg"], section="国内外要闻")
     page = render_html("2026-07-21", {"国内外要闻": [item]}, {}, "https://example.test")
     assert page.count('class="news-image"') == 2
+
+
+def test_html_places_images_inside_expanded_article_after_paragraphs():
+    item = NewsItem("标题", "36氪", "https://36kr.com/p/1", "", "", article="第一段。\n\n第二段。\n\n第三段。", image_urls=["images/a.jpg", "images/b.jpg"], section="国内外要闻")
+    page = render_html("2026-07-21", {"国内外要闻": [item]}, {}, "https://example.test")
+    assert page.index("<h3>标题</h3>") < page.index('class="news-image"')
+    assert page.index("<p>第一段。</p>") < page.index('src="images/a.jpg"') < page.index("<p>第二段。</p>")
+    assert page.index("<p>第二段。</p>") < page.index('src="images/b.jpg"') < page.index("<p>第三段。</p>")
 
 
 def test_short_complete_summary_is_kept_when_ai_strict_length_check_fails(monkeypatch):
