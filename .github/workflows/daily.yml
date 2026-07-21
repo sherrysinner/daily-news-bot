@@ -2,7 +2,8 @@ name: Daily news delivery
 
 on:
   schedule:
-    - cron: "0 0 * * *"
+    # 北京时间 07:45：避开 UTC 整点的 Actions 调度高峰，为 08:00 推送留出缓冲。
+    - cron: "45 23 * * *"
   workflow_dispatch:
 
 permissions:

@@ -1,5 +1,7 @@
 import main as main_module
 
+from datetime import datetime, timezone
+
 from main import (
     RSS_SOURCES,
     WALLSTREETCN_URL,
@@ -8,6 +10,10 @@ from main import (
     ai_enrich,
     build_hot_words,
     clean_editorial_title,
+    cache_article_image,
+    beijing_today,
+    build_wechat_messages,
+    fallback_text,
     fill_section_gaps,
     fetch_newsnow_hot_words,
     fetch_newsnow_platform,
@@ -136,6 +142,61 @@ def test_html_shows_a_duplicate_image_only_once():
     second = NewsItem("乙", "中新网", "https://example.test/2", "", "", image_url="https://img.example/a.jpg", section="国内外要闻")
     page = render_html("2026-07-21", {"国内外要闻": [first, second]}, {}, "https://example.test")
     assert page.count('class="news-image"') == 1
+
+
+def test_chinanews_image_is_not_used_when_it_may_be_a_generic_rss_image(tmp_path):
+    item = NewsItem("标题", "中新网国内", "https://example.test/1", "", "", image_url="https://img.example/a.jpg")
+    cache_article_image(object(), item, tmp_path)
+    assert item.image_url == ""
+
+
+class ImageResponse:
+    headers = {"Content-Type": "image/jpeg"}
+    content = b"real-image-bytes"
+
+    def raise_for_status(self):
+        return None
+
+
+class ImageSession:
+    def get(self, *_args, **_kwargs):
+        return ImageResponse()
+
+
+def test_article_image_is_cached_beside_daily_html(tmp_path):
+    item = NewsItem("标题", "36氪", "https://36kr.com/p/1", "", "", image_url="https://img.example/a.jpg")
+    cache_article_image(ImageSession(), item, tmp_path)
+    assert item.image_url.startswith("images/")
+    assert (tmp_path / item.image_url.removeprefix("images/")).is_file()
+
+
+def test_short_complete_summary_is_kept_when_ai_strict_length_check_fails(monkeypatch):
+    responses = iter([
+        {"title": "测试标题", "summary": "这是一个完整但较短的新闻摘要，说明了事件主体和已经发生的事实。", "article": "第一句。第二句。第三句。"},
+        {"summary": "仍然过短。"},
+    ])
+    monkeypatch.setattr(main_module, "call_deepseek", lambda *_args, **_kwargs: next(responses))
+    item = NewsItem("原标题", "测试来源", "https://example.test/news", "原始简介第一句。后续内容。", "正文", section="国内外要闻")
+    ai_enrich({"国内外要闻": [item]}, object(), "test-key")
+    assert item.summary == "这是一个完整但较短的新闻摘要，说明了事件主体和已经发生的事实。"
+
+
+def test_fallback_summary_uses_the_first_complete_source_sentence():
+    item = NewsItem("原标题", "测试来源", "https://example.test/news", "这是一条可读的来源简介第一句。第二句不应成为摘要。", "")
+    summary, _ = fallback_text(item)
+    assert summary == "这是一条可读的来源简介第一句。"
+
+
+def test_hot_words_are_rendered_as_numbered_rows_in_html_and_wechat():
+    hot = {"微博热搜": ["热词一", "热词二"]}
+    page = render_html("2026-07-21", {}, hot, "https://example.test")
+    messages = build_wechat_messages("2026-07-21", {}, hot, "https://example.test")
+    assert "<ol class=\"hot-list\"><li>热词一</li><li>热词二</li></ol>" in page
+    assert "1. 热词一\n2. 热词二" in "\n".join(messages)
+
+
+def test_daily_date_uses_beijing_timezone():
+    assert beijing_today(datetime(2026, 7, 20, 23, 45, tzinfo=timezone.utc)) == "2026-07-21"
 
 
 def test_summary_must_be_a_complete_sentence_between_fifty_and_eighty_characters():

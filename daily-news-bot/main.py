@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -34,6 +35,7 @@ MAX_ITEMS_PER_SOURCE = 3
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 WALLSTREETCN_URL = "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=30"
 NEWSNOW_DEFAULT_BASE_URL = "https://newsnow.busiyi.world/api/s"
+BEIJING_TIMEZONE = "Asia/Shanghai"
 
 
 @dataclass
@@ -150,6 +152,14 @@ def is_expected_url(url: str, expected_domain: str) -> bool:
     return parsed.scheme == "https" and (host == domain or host.endswith(f".{domain}"))
 
 
+def beijing_today(now: datetime | None = None) -> str:
+    """使用北京时间命名日报，避免 GitHub 运行器的 UTC 日期跨日。"""
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo(BEIJING_TIMEZONE)
+    return (now.astimezone(zone) if now else datetime.now(zone)).date().isoformat()
+
+
 def fetch_newsnow_platform(
     session: requests.Session,
     platform_id: str,
@@ -178,6 +188,9 @@ def fetch_newsnow_hot_words(session: requests.Session, platform_id: str) -> list
 
 
 def extract_article(item: NewsItem) -> NewsItem:
+    # 中新网 RSS 的 media 图经常是频道通用图，与具体报道无关，宁可不显示也不误导读者。
+    if item.source.startswith("中新网"):
+        item.image_url = ""
     if Article is None or item.source == "华尔街日报":
         return item
     try:
@@ -185,7 +198,7 @@ def extract_article(item: NewsItem) -> NewsItem:
         article.download()
         article.parse()
         item.content = to_simplified(plain_text(article.text))
-        if item.content and not item.image_url:
+        if item.content and not item.image_url and not item.source.startswith("中新网"):
             item.image_url = article.top_image or ""
     except Exception as exc:  # noqa: BLE001
         logging.warning("正文提取失败：%s，%s", item.title, exc)
@@ -194,7 +207,35 @@ def extract_article(item: NewsItem) -> NewsItem:
 
 def is_displayable_image(url: str, seen_images: set[str]) -> bool:
     """通用站点占位图容易重复或与新闻无关，重复图片不再展示。"""
-    return url.startswith(("http://", "https://")) and url not in seen_images
+    return url.startswith(("http://", "https://", "images/")) and url not in seen_images
+
+
+def cache_article_image(session: requests.Session, item: NewsItem, image_dir: Path) -> None:
+    """将可用配图保存到日报目录，避免外站防盗链或多图链接导致页面失效。"""
+    if item.source.startswith("中新网") or not item.image_url.startswith(("http://", "https://")):
+        item.image_url = ""
+        return
+    try:
+        response = session.get(
+            item.image_url,
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": item.url},
+        )
+        response.raise_for_status()
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+        suffix = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif"}.get(content_type)
+        content = response.content
+        if not suffix or not content or len(content) > 5 * 1024 * 1024:
+            raise ValueError("不是可保存的新闻图片")
+        image_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{hashlib.sha256(content).hexdigest()}.{suffix}"
+        path = image_dir / filename
+        if not path.exists():
+            path.write_bytes(content)
+        item.image_url = f"images/{filename}"
+    except Exception as exc:  # noqa: BLE001 - 图片失败不能影响新闻正文
+        logging.info("配图未采用：%s，%s", item.title, exc)
+        item.image_url = ""
 
 
 def fetch_hot_words(session: requests.Session, url: str) -> list[str]:
@@ -339,6 +380,18 @@ def is_valid_summary(value: str) -> bool:
     return 50 <= len(text) <= 80 and text.endswith(("。", "！", "？"))
 
 
+def is_usable_summary(value: str) -> bool:
+    """AI 临时波动时，完整的短句比通用占位提示更适合妈妈阅读。"""
+    text = plain_text(value)
+    return len(text) >= 12 and text.endswith(("。", "！", "？"))
+
+
+def first_complete_sentence(value: str) -> str:
+    text = plain_text(value)
+    match = re.match(r".+?[。！？]", text)
+    return match.group(0) if match else ""
+
+
 def is_valid_article(value: str) -> bool:
     article = normalize_article_paragraphs(value)
     paragraphs = article.split("\n\n") if article else []
@@ -358,7 +411,10 @@ def editorial_fields(result: dict[str, Any] | None) -> tuple[str, str, str]:
 def fallback_text(item: NewsItem) -> tuple[str, str]:
     """AI 连续失败时保留来源事实，不用截断文本伪装成完整摘要。"""
     raw = plain_text(item.description or item.content or item.title)
-    summary = "该新闻暂未生成符合格式的摘要，请点击原文查看完整报道。"
+    summary = first_complete_sentence(item.description) or first_complete_sentence(item.content)
+    if not is_usable_summary(summary):
+        title = plain_text(item.title)
+        summary = f"{title}，详情请阅读原文。" if title else "详情请阅读原文。"
     article = normalize_article_paragraphs(raw)
     return summary, article
 
@@ -386,15 +442,17 @@ article 必须为300至500个汉字、3至5个自然段；各段之间用两个�
             if title:
                 item.title = title
             fallback_summary, fallback_article = fallback_text(item)
-            item.summary = summary if is_valid_summary(summary) else fallback_summary
+            item.summary = summary if is_usable_summary(summary) else fallback_summary
             item.article = article or fallback_article
             if is_valid_summary(summary):
                 if is_valid_article(article):
                     logging.info("AI 整理成功：%s", item.title)
                 else:
                     logging.info("AI 整理完成：%s，正文未达建议长度但已保留并分段", item.title)
+            elif is_usable_summary(summary):
+                logging.info("AI 摘要采用完整短句：%s", item.title)
             else:
-                logging.warning("AI 摘要降级：%s，摘要未通过质量校验", item.title)
+                logging.warning("AI 摘要降级：%s，改用来源完整句", item.title)
 
 
 def render_html(date_text: str, sections: dict[str, list[NewsItem]], hot_words: dict[str, list[str]], page_url: str) -> str:
@@ -410,8 +468,12 @@ def render_html(date_text: str, sections: dict[str, list[NewsItem]], hot_words: 
             paragraphs = "".join(f"<p>{html.escape(part)}</p>" for part in normalize_article_paragraphs(item.article).split("\n\n") if part.strip())
             cards.append(f'<article id="news-{number}">{image}<h3>{html.escape(item.title)}</h3><p class="meta">来源：{html.escape(item.source)}</p><p>{html.escape(item.summary)}</p><details><summary>点击展开新闻整理</summary>{paragraphs}<p><a href="{html.escape(item.url, quote=True)}" target="_blank" rel="noopener">阅读原文</a></p></details></article>')
         blocks.append(f"<section><h2>{section}</h2>{''.join(cards) or '<p>今日暂未获取到合适新闻。</p>'}</section>")
-    hot = "".join(f"<h3>{html.escape(name)}</h3><p>{'　'.join(html.escape(x) for x in words) or '暂无数据'}</p>" for name, words in hot_words.items())
-    return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>今日新闻杂志 {date_text}</title><style>body{{margin:0;background:#f6f5f1;color:#272727;font:17px/1.75 system-ui,"Microsoft YaHei",sans-serif}}main{{max-width:760px;margin:auto;padding:18px}}header,section,footer{{background:#fff;border-radius:12px;padding:18px;margin:14px 0;box-shadow:0 1px 4px #ddd}}h1{{font-size:27px;margin:0}}h2{{font-size:22px;border-left:5px solid #a6412e;padding-left:10px}}h3{{font-size:19px;margin-bottom:4px}}article{{border-top:1px solid #e8e4dc;padding:12px 0}}.news-image{{width:100%;max-height:280px;object-fit:cover;border-radius:8px}}.meta{{color:#666;font-size:15px}}summary{{color:#8b3828;font-weight:600;cursor:pointer}}a{{color:#8b3828}}details p{{white-space:pre-wrap}}footer{{font-size:15px;color:#555}}</style><main><header><h1>今日新闻杂志</h1><p>{html.escape(date_text)}</p></header>{''.join(blocks)}<section><h2>今日热搜</h2>{hot}</section><footer>新闻内容由公开 RSS 与原文整理而成，供阅读参考；请以原始报道为准。网页版入口：{html.escape(page_url)}</footer></main></html>'''
+    hot = "".join(
+        f"<h3>{html.escape(name)}</h3><ol class=\"hot-list\">"
+        f"{''.join(f'<li>{html.escape(word)}</li>' for word in words) or '<li>暂无数据</li>'}</ol>"
+        for name, words in hot_words.items()
+    )
+    return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>今日新闻杂志 {date_text}</title><style>body{{margin:0;background:#f6f5f1;color:#272727;font:17px/1.75 system-ui,"Microsoft YaHei",sans-serif}}main{{max-width:760px;margin:auto;padding:18px}}header,section,footer{{background:#fff;border-radius:12px;padding:18px;margin:14px 0;box-shadow:0 1px 4px #ddd}}h1{{font-size:27px;margin:0}}h2{{font-size:22px;border-left:5px solid #a6412e;padding-left:10px}}h3{{font-size:19px;margin-bottom:4px}}article{{border-top:1px solid #e8e4dc;padding:12px 0}}.news-image{{width:100%;max-height:280px;object-fit:cover;border-radius:8px}}.meta{{color:#666;font-size:15px}}summary{{color:#8b3828;font-weight:600;cursor:pointer}}a{{color:#8b3828}}details p{{white-space:pre-wrap}}.hot-list{{margin:0 0 16px;padding-left:1.6em}}.hot-list li{{padding:4px 0}}footer{{font-size:15px;color:#555}}</style><main><header><h1>今日新闻杂志</h1><p>{html.escape(date_text)}</p></header>{''.join(blocks)}<section><h2>今日热搜</h2>{hot}</section><footer>新闻内容由公开 RSS 与原文整理而成，供阅读参考；请以原始报道为准。网页版入口：{html.escape(page_url)}</footer></main></html>'''
 
 
 def split_markdown(text: str, limit: int = 4096) -> list[str]:
@@ -440,7 +502,11 @@ def build_wechat_messages(date_text: str, sections: dict[str, list[NewsItem]], h
             number += 1
             lines.extend([f"**{item.title}**", item.summary, f"[阅读全文]({page_url}/news/{date_text}.html#news-{number})", ""])
         messages.extend(split_markdown("\n".join(lines)))
-    hot = "\n".join([f"## 今日热搜｜{date_text}"] + [f"**{name}**：{'、'.join(words) or '暂无数据'}" for name, words in hot_words.items()])
+    hot_lines = [f"## 今日热搜｜{date_text}"]
+    for name, words in hot_words.items():
+        hot_lines.append(f"**{name}**")
+        hot_lines.extend(f"{index}. {word}" for index, word in enumerate(words, start=1))
+    hot = "\n".join(hot_lines)
     messages.extend(split_markdown(hot))
     messages.extend(split_markdown(f"## 来源与网页版\n新闻来自新华社、BBC中文、36氪、新浪财经和新浪娱乐等公开 RSS；内容经整理，原文链接可核对。\n[打开今日新闻杂志]({page_url}/news/{date_text}.html)"))
     return messages
@@ -461,16 +527,20 @@ def main() -> None:
     if not config:
         return
     session = requests.Session()
-    today = date.today().isoformat()
+    today = beijing_today()
     rss_items = [extract_article(item) for item in fetch_rss_sources(session)]
     finance_items = fetch_newsnow_platform(session, "wallstreetcn-hot", "华尔街见闻", "wallstreetcn.com", "金融财经")
     finance_items += fetch_newsnow_platform(session, "cls-hot", "财联社", "cls.cn", "金融财经")
     items = rss_items + finance_items
     sections = ai_select(items, session, config.deepseek_api_key)
     ai_enrich(sections, session, config.deepseek_api_key)
-    hot_words = build_hot_words(fetch_newsnow_hot_words(session, "weibo"), [])
+    hot_words = build_hot_words(fetch_newsnow_hot_words(session, "weibo"), fetch_hot_words(session, HOT_URLS["小红书热搜"]))
     output = Path(__file__).resolve().parent / "news"
     output.mkdir(exist_ok=True)
+    image_dir = output / "images"
+    for items in sections.values():
+        for item in items:
+            cache_article_image(session, item, image_dir)
     (output / f"{today}.html").write_text(render_html(today, sections, hot_words, config.page_url), encoding="utf-8")
     send_wechat_messages(session, config.webhook_url, build_wechat_messages(today, sections, hot_words, config.page_url))
     logging.info("日报完成：%s，入选 %d 条", today, sum(len(value) for value in sections.values()))

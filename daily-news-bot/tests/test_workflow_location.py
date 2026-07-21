@@ -11,3 +11,9 @@ def test_workflow_uses_defaultable_newsnow_base_url_without_a_secret():
     text = (repository_root / ".github" / "workflows" / "daily.yml").read_text(encoding="utf-8")
     assert "NEWSNOW_BASE_URL: ${{ vars.NEWSNOW_BASE_URL }}" in text
     assert "secrets.NEWSNOW_BASE_URL" not in text
+
+
+def test_schedule_runs_before_beijing_eight_to_reduce_top_of_hour_delays():
+    repository_root = Path(__file__).resolve().parents[2]
+    text = (repository_root / ".github" / "workflows" / "daily.yml").read_text(encoding="utf-8")
+    assert 'cron: "45 23 * * *"' in text
