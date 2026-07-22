@@ -10,6 +10,7 @@ from main import (
     WALLSTREETCN_URL,
     NewsItem,
     HotTopic,
+    GeoBrief,
     apply_source_limits,
     ai_enrich,
     build_hot_words,
@@ -22,12 +23,15 @@ from main import (
     fill_section_gaps,
     fetch_newsnow_hot_words,
     fetch_newsnow_hot_topics,
+    hot_topic_note,
     fetch_newsnow_platform,
     is_valid_article,
     is_valid_summary,
     normalize_article_paragraphs,
     paragraphize_article,
     render_html,
+    extract_body_image_urls,
+    ai_geopolitical_brief,
     split_markdown,
     to_simplified,
 )
@@ -220,12 +224,21 @@ def test_html_renders_two_images_for_one_news_item():
     assert page.count('class="news-image"') == 2
 
 
-def test_html_places_images_inside_expanded_article_after_paragraphs():
+def test_html_uses_first_image_as_cover_and_keeps_remaining_images_at_article_end():
     item = NewsItem("标题", "36氪", "https://36kr.com/p/1", "", "", article="第一段。\n\n第二段。\n\n第三段。", image_urls=["images/a.jpg", "images/b.jpg"], section="国内外要闻")
     page = render_html("2026-07-21", {"国内外要闻": [item]}, {}, "https://example.test")
     assert page.index("<h3>标题</h3>") < page.index('class="news-image"')
-    assert page.index("<p>第一段。</p>") < page.index('src="images/a.jpg"') < page.index("<p>第二段。</p>")
-    assert page.index("<p>第二段。</p>") < page.index('src="images/b.jpg"') < page.index("<p>第三段。</p>")
+    assert page.index('src="images/a.jpg"') < page.index("<details>")
+    assert page.index("<p>第三段。</p>") < page.index('src="images/b.jpg"')
+
+
+def test_body_image_urls_keep_article_order_and_skip_page_chrome():
+    page = '''<html><body><header><img src="/logo.png"></header><article>
+    <p>正文</p><img data-src="/body-first.jpg"><img src="/advert-banner.jpg"><img src="/body-last.jpg">
+    </article><footer><img src="/footer.jpg"></footer></body></html>'''
+    assert extract_body_image_urls(page, "https://example.test/news") == [
+        "https://example.test/body-first.jpg", "https://example.test/body-last.jpg",
+    ]
 
 
 def test_short_complete_summary_is_kept_when_ai_strict_length_check_fails(monkeypatch):
@@ -253,13 +266,28 @@ def test_hot_words_are_rendered_as_numbered_rows_in_html_and_wechat():
     assert "1. 热词一\n2. 热词二" in "\n".join(messages)
 
 
-def test_hot_topic_has_a_clickable_expandable_detail_in_html_and_wechat():
+def test_hot_topic_has_a_clickable_title_and_a_single_column_note_in_html_and_wechat():
     topic = HotTopic("热词一", "https://s.weibo.com/weibo?q=x", "点击查看微博实时讨论")
     page = render_html("2026-07-21", {}, {"微博热搜": [topic]}, "https://example.test")
     messages = build_wechat_messages("2026-07-21", {}, {"微博热搜": [topic]}, "https://example.test")
     assert 'href="https://s.weibo.com/weibo?q=x"' in page
-    assert "点击查看微博实时讨论" in page
+    assert page.count('class="hot-note"') == 1
+    assert hot_topic_note("微博热搜") in page
     assert "[热词一](https://s.weibo.com/weibo?q=x)" in "\n".join(messages)
+    assert f"\n{hot_topic_note('微博热搜')}" in "\n".join(messages)
+
+
+def test_geo_brief_is_exactly_three_items_and_rendered_before_news(monkeypatch):
+    response = {"briefs": [
+        {"title": "第一条", "event": "发生了第一件事。", "impact": "影响一。", "watch": "关注一。"},
+        {"title": "第二条", "event": "发生了第二件事。", "impact": "影响二。", "watch": "关注二。"},
+        {"title": "第三条", "event": "发生了第三件事。", "impact": "影响三。", "watch": "关注三。"},
+    ]}
+    monkeypatch.setattr(main_module, "call_deepseek", lambda *_args, **_kwargs: response)
+    briefs = ai_geopolitical_brief({"国内外要闻": [NewsItem("国际新闻", "来源", "https://example.test", "事实。", "事实。", summary="完整事实。")]} , object(), "key")
+    assert briefs == [GeoBrief("第一条", "发生了第一件事。", "影响一。", "关注一。"), GeoBrief("第二条", "发生了第二件事。", "影响二。", "关注二。"), GeoBrief("第三条", "发生了第三件事。", "影响三。", "关注三。")]
+    page = render_html("2026-07-21", {"国内外要闻": []}, {}, "https://example.test", briefs)
+    assert page.index('id="geopolitics"') < page.index("国内外要闻")
 
 
 def test_daily_date_uses_beijing_timezone():
