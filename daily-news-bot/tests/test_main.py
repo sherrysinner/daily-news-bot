@@ -288,6 +288,11 @@ def test_geo_brief_is_exactly_three_items_and_rendered_before_news(monkeypatch):
     assert briefs == [GeoBrief("第一条", "发生了第一件事。", "影响一。", "关注一。"), GeoBrief("第二条", "发生了第二件事。", "影响二。", "关注二。"), GeoBrief("第三条", "发生了第三件事。", "影响三。", "关注三。")]
     page = render_html("2026-07-21", {"国内外要闻": []}, {}, "https://example.test", briefs)
     assert page.index('id="geopolitics"') < page.index("国内外要闻")
+    assert "事件概述：" in page
+    assert "影响分析：" in page
+    assert "后续关注：" in page
+    assert '<ul class="geo-points">' in page
+    assert "发生了什么：" not in page
 
 
 def test_daily_date_uses_beijing_timezone():

@@ -652,9 +652,15 @@ def render_html(date_text: str, sections: dict[str, list[NewsItem]], hot_words: 
         f"{''.join(render_hot_topic(topic) for topic in words) or '<li>暂无数据</li>'}</ol><p class=\"hot-note\">{hot_topic_note(name)}</p>"
         for name, words in hot_words.items()
     )
-    geo = "".join(f'<article class="geo-item"><h3>{index}. {html.escape(brief.title)}</h3><p><b>发生了什么：</b>{html.escape(brief.event)}</p><p><b>可能影响：</b>{html.escape(brief.impact)}</p><p><b>关注：</b>{html.escape(brief.watch)}</p></article>' for index, brief in enumerate(geo_briefs or [], 1))
+    geo = "".join(
+        f'<article class="geo-item"><h3>{index}. {html.escape(brief.title)}</h3>'
+        f'<ul class="geo-points"><li><b>事件概述：</b>{html.escape(brief.event)}</li>'
+        f'<li><b>影响分析：</b>{html.escape(brief.impact)}</li>'
+        f'<li><b>后续关注：</b>{html.escape(brief.watch)}</li></ul></article>'
+        for index, brief in enumerate(geo_briefs or [], 1)
+    )
     geo_section = f'<section id="geopolitics"><h2>地缘政治简报</h2>{geo}</section>' if geo else ""
-    return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>今日新闻杂志 {date_text}</title><style>body{{margin:0;background:#f6f5f1;color:#272727;font:17px/1.75 system-ui,"Microsoft YaHei",sans-serif}}main{{max-width:760px;margin:auto;padding:18px}}header,section,footer{{background:#fff;border-radius:12px;padding:18px;margin:14px 0;box-shadow:0 1px 4px #ddd}}h1{{font-size:27px;margin:0}}h2{{font-size:22px;border-left:5px solid #a6412e;padding-left:10px}}h3{{font-size:19px;margin-bottom:4px}}article{{border-top:1px solid #e8e4dc;padding:12px 0}}.news-image{{width:100%;max-height:280px;object-fit:cover;border-radius:8px;margin:8px 0;object-fit:cover}}.article-gallery{{margin-top:14px}}.article-gallery .news-image{{display:block}}.meta{{color:#666;font-size:15px}}summary{{color:#8b3828;font-weight:600;cursor:pointer}}a{{color:#8b3828}}details p{{white-space:pre-wrap}}.hot-list{{margin:0;padding-left:1.6em}}.hot-list li{{padding:4px 0}}.hot-note{{font-size:15px;color:#666;margin:4px 0 16px}}.geo-item p{{margin:6px 0}}footer{{font-size:15px;color:#555}}</style><main><header><h1>今日新闻杂志</h1><p>{html.escape(date_text)}</p></header>{geo_section}{''.join(blocks)}<section><h2>今日热搜</h2>{hot}</section><footer>新闻内容由公开 RSS 与原文整理而成，供阅读参考；请以原始报道为准。网页版入口：{html.escape(page_url)}</footer></main></html>'''
+    return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>今日新闻杂志 {date_text}</title><style>body{{margin:0;background:#f6f5f1;color:#272727;font:17px/1.75 system-ui,"Microsoft YaHei",sans-serif}}main{{max-width:760px;margin:auto;padding:18px}}header,section,footer{{background:#fff;border-radius:12px;padding:18px;margin:14px 0;box-shadow:0 1px 4px #ddd}}h1{{font-size:27px;margin:0}}h2{{font-size:22px;border-left:5px solid #a6412e;padding-left:10px}}h3{{font-size:19px;margin-bottom:4px}}article{{border-top:1px solid #e8e4dc;padding:12px 0}}.news-image{{width:100%;max-height:280px;object-fit:cover;border-radius:8px;margin:8px 0;object-fit:cover}}.article-gallery{{margin-top:14px}}.article-gallery .news-image{{display:block}}.meta{{color:#666;font-size:15px}}summary{{color:#8b3828;font-weight:600;cursor:pointer}}a{{color:#8b3828}}details p{{white-space:pre-wrap}}.hot-list{{margin:0;padding-left:1.6em}}.hot-list li{{padding:4px 0}}.hot-note{{font-size:15px;color:#666;margin:4px 0 16px}}.geo-item{{padding:20px 0}}.geo-item h3{{font-size:21px;margin:0 0 12px}}.geo-points{{margin:0;padding-left:1.35em}}.geo-points li{{padding:4px 0 4px 8px}}.geo-points b{{font-weight:750}}footer{{font-size:15px;color:#555}}</style><main><header><h1>今日新闻杂志</h1><p>{html.escape(date_text)}</p></header>{geo_section}{''.join(blocks)}<section><h2>今日热搜</h2>{hot}</section><footer>新闻内容由公开 RSS 与原文整理而成，供阅读参考；请以原始报道为准。网页版入口：{html.escape(page_url)}</footer></main></html>'''
 
 
 def split_markdown(text: str, limit: int = 4096) -> list[str]:
@@ -680,7 +686,7 @@ def build_wechat_messages(date_text: str, sections: dict[str, list[NewsItem]], h
     if geo_briefs:
         geo_lines = [f"## 地缘政治简报｜{date_text}"]
         for index, brief in enumerate(geo_briefs, 1):
-            geo_lines.extend([f"**{index}. {brief.title}**", f"发生了什么：{brief.event}", f"可能影响：{brief.impact}", f"关注：{brief.watch}", ""])
+            geo_lines.extend([f"**{index}. {brief.title}**", f"• **事件概述：**{brief.event}", f"• **影响分析：**{brief.impact}", f"• **后续关注：**{brief.watch}", ""])
         geo_lines.append(f"[打开网页版简报]({page_url}/news/{date_text}.html#geopolitics)")
         messages.extend(split_markdown("\n".join(geo_lines)))
     for section in SECTION_LIMITS:
