@@ -6,8 +6,11 @@ from pathlib import Path
 
 from main import (
     BilibiliVideo,
+    bilibili_player_url,
+    build_wechat_messages,
     load_sent_bilibili_videos,
     record_sent_bilibili_videos,
+    render_html,
     select_bilibili_videos,
 )
 
@@ -44,3 +47,19 @@ def test_sent_bilibili_history_prunes_old_entries_and_keeps_new_ones(tmp_path: P
     record_sent_bilibili_videos(history_path, [video], "2026-07-28")
 
     assert load_sent_bilibili_videos(history_path) == {"BVkept", "BVnew"}
+
+
+def test_bilibili_player_url_uses_embedded_player_and_bvid() -> None:
+    assert bilibili_player_url("BV1abc") == "https://player.bilibili.com/player.html?bvid=BV1abc&page=1&high_quality=1&danmaku=0"
+
+
+def test_bilibili_videos_render_embedded_player_and_use_it_in_wechat() -> None:
+    video = BilibiliVideo("央视新闻", "测试视频", "BVnew", "https://www.bilibili.com/video/BVnew", datetime(2026, 7, 28, 7, tzinfo=BEIJING))
+
+    page = render_html("2026-07-28", {}, {}, "https://example.test", bilibili_videos=[video])
+    messages = build_wechat_messages("2026-07-28", {}, {}, "https://example.test", bilibili_videos=[video])
+
+    assert 'src="https://player.bilibili.com/player.html?bvid=BVnew&amp;page=1&amp;high_quality=1&amp;danmaku=0"' in page
+    assert 'allowfullscreen' in page
+    assert '打开 B站原页面' in page
+    assert "[观看视频](https://player.bilibili.com/player.html?bvid=BVnew&page=1&high_quality=1&danmaku=0)" in "\n".join(messages)

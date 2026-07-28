@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 import feedparser
 import requests
@@ -228,6 +228,11 @@ def record_sent_bilibili_videos(
     kept.update({video.bvid: today for video in videos})
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"videos": kept}, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def bilibili_player_url(bvid: str) -> str:
+    """返回 B 站官方嵌入式播放器地址，适合在网页内直接播放。"""
+    return f"https://player.bilibili.com/player.html?bvid={quote(bvid, safe='')}&page=1&high_quality=1&danmaku=0"
 
 
 def select_bilibili_videos(
@@ -789,11 +794,13 @@ def render_html(
     video_cards = "".join(
         f'<article class="bilibili-video"><h3>{html.escape(video.source)}｜{html.escape(video.title)}</h3>'
         f'<p class="meta">发布时间：{html.escape(video.published_at.strftime("%Y-%m-%d %H:%M"))}</p>'
-        f'<p><a href="{html.escape(video.url, quote=True)}" target="_blank" rel="noopener">打开 B 站观看</a></p></article>'
+        f'<div class="bilibili-player"><iframe src="{html.escape(bilibili_player_url(video.bvid), quote=True)}" '
+        f'title="{html.escape(video.title, quote=True)}" allow="autoplay; fullscreen" allowfullscreen loading="lazy"></iframe></div>'
+        f'<p><a href="{html.escape(video.url, quote=True)}" target="_blank" rel="noopener">打开 B站原页面</a></p></article>'
         for video in bilibili_videos or []
     )
     video_section = f'<section id="bilibili-videos"><h2>B站新闻视频</h2>{video_cards}</section>' if video_cards else ""
-    return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>今日新闻杂志 {date_text}</title><style>body{{margin:0;background:#f6f5f1;color:#272727;font:17px/1.75 system-ui,"Microsoft YaHei",sans-serif}}main{{max-width:760px;margin:auto;padding:18px}}header,section,footer{{background:#fff;border-radius:12px;padding:18px;margin:14px 0;box-shadow:0 1px 4px #ddd}}h1{{font-size:27px;margin:0}}h2{{font-size:22px;border-left:5px solid #a6412e;padding-left:10px}}h3{{font-size:19px;margin-bottom:4px}}article{{border-top:1px solid #e8e4dc;padding:12px 0}}.news-image{{width:100%;max-height:280px;object-fit:cover;border-radius:8px;margin:8px 0;object-fit:cover}}.article-gallery{{margin-top:14px}}.article-gallery .news-image{{display:block}}.meta{{color:#666;font-size:15px}}summary{{color:#8b3828;font-weight:600;cursor:pointer}}a{{color:#8b3828}}details p{{white-space:pre-wrap}}.hot-list{{margin:0;padding-left:1.6em}}.hot-list li{{padding:4px 0}}.hot-note{{font-size:15px;color:#666;margin:4px 0 16px}}.geo-item{{padding:20px 0}}.geo-item h3{{font-size:21px;margin:0 0 12px}}.geo-points{{margin:0;padding-left:1.35em}}.geo-points li{{padding:4px 0 4px 8px}}.geo-points b{{font-weight:750}}.bilibili-video{{padding:14px 0}}footer{{font-size:15px;color:#555}}</style><main><header><h1>今日新闻杂志</h1><p>{html.escape(date_text)}</p></header>{geo_section}{video_section}{''.join(blocks)}<section><h2>今日热搜</h2>{hot}</section><footer>新闻内容由公开 RSS 与原文整理而成，供阅读参考；请以原始报道为准。网页版入口：{html.escape(page_url)}</footer></main></html>'''
+    return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>今日新闻杂志 {date_text}</title><style>body{{margin:0;background:#f6f5f1;color:#272727;font:17px/1.75 system-ui,"Microsoft YaHei",sans-serif}}main{{max-width:760px;margin:auto;padding:18px}}header,section,footer{{background:#fff;border-radius:12px;padding:18px;margin:14px 0;box-shadow:0 1px 4px #ddd}}h1{{font-size:27px;margin:0}}h2{{font-size:22px;border-left:5px solid #a6412e;padding-left:10px}}h3{{font-size:19px;margin-bottom:4px}}article{{border-top:1px solid #e8e4dc;padding:12px 0}}.news-image{{width:100%;max-height:280px;object-fit:cover;border-radius:8px;margin:8px 0;object-fit:cover}}.article-gallery{{margin-top:14px}}.article-gallery .news-image{{display:block}}.meta{{color:#666;font-size:15px}}summary{{color:#8b3828;font-weight:600;cursor:pointer}}a{{color:#8b3828}}details p{{white-space:pre-wrap}}.hot-list{{margin:0;padding-left:1.6em}}.hot-list li{{padding:4px 0}}.hot-note{{font-size:15px;color:#666;margin:4px 0 16px}}.geo-item{{padding:20px 0}}.geo-item h3{{font-size:21px;margin:0 0 12px}}.geo-points{{margin:0;padding-left:1.35em}}.geo-points li{{padding:4px 0 4px 8px}}.geo-points b{{font-weight:750}}.bilibili-video{{padding:14px 0}}.bilibili-player{{position:relative;width:100%;aspect-ratio:16/9;margin:10px 0;border-radius:8px;overflow:hidden;background:#111}}.bilibili-player iframe{{position:absolute;width:100%;height:100%;border:0;inset:0}}footer{{font-size:15px;color:#555}}</style><main><header><h1>今日新闻杂志</h1><p>{html.escape(date_text)}</p></header>{geo_section}{video_section}{''.join(blocks)}<section><h2>今日热搜</h2>{hot}</section><footer>新闻内容由公开 RSS 与原文整理而成，供阅读参考；请以原始报道为准。网页版入口：{html.escape(page_url)}</footer></main></html>'''
 
 
 def split_markdown(text: str, limit: int = 4096) -> list[str]:
@@ -853,7 +860,7 @@ def build_wechat_messages(
                 [
                     f"**{video.source}｜{video.title}**",
                     f"发布时间：{video.published_at.strftime('%Y-%m-%d %H:%M')}",
-                    f"[观看视频]({video.url})",
+                    f"[观看视频]({bilibili_player_url(video.bvid)})",
                     "",
                 ]
             )
