@@ -5,3 +5,5 @@ lxml_html_clean==0.4.5
 opencc-python-reimplemented==0.1.7
 pytest==9.1.1
 Pillow==12.2.0
+bilibili-api-python==17.4.2
+aiohttp==3.11.18

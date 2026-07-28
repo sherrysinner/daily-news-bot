@@ -9,7 +9,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -39,6 +39,10 @@ DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 WALLSTREETCN_URL = "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=30"
 NEWSNOW_DEFAULT_BASE_URL = "https://newsnow.busiyi.world/api/s"
 BEIJING_TIMEZONE = "Asia/Shanghai"
+BILIBILI_NEWS_UPS = ("央视频", "央视新闻", "1818黄金眼", "一觉醒来发生啥")
+BILIBILI_MAX_PER_UP = 2
+BILIBILI_HISTORY_DAYS = 90
+SENT_BILIBILI_VIDEOS_PATH = Path(__file__).resolve().parent / "data" / "sent_bilibili_videos.json"
 
 
 @dataclass
@@ -70,6 +74,17 @@ class GeoBrief:
     event: str
     impact: str
     watch: str
+
+
+@dataclass(frozen=True)
+class BilibiliVideo:
+    """日报中展示的一条 B 站新闻视频。"""
+
+    source: str
+    title: str
+    bvid: str
+    url: str
+    published_at: datetime
 
 
 @dataclass
@@ -179,6 +194,110 @@ def beijing_today(now: datetime | None = None) -> str:
 
     zone = ZoneInfo(BEIJING_TIMEZONE)
     return (now.astimezone(zone) if now else datetime.now(zone)).date().isoformat()
+
+
+def load_sent_bilibili_videos(path: Path = SENT_BILIBILI_VIDEOS_PATH) -> set[str]:
+    """读取已推送 BV 号；记录损坏时宁可重新抓取，也不阻塞日报。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        videos = data.get("videos", {}) if isinstance(data, dict) else {}
+        return {str(bvid) for bvid, sent_date in videos.items() if bvid and isinstance(sent_date, str)}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return set()
+
+
+def record_sent_bilibili_videos(
+    path: Path,
+    videos: list[BilibiliVideo],
+    today: str,
+) -> None:
+    """保存最近 90 天成功推送的 BV 号，供下次运行去重。"""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        existing = raw.get("videos", {}) if isinstance(raw, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        existing = {}
+    cutoff = datetime.fromisoformat(today).date() - timedelta(days=BILIBILI_HISTORY_DAYS)
+    kept: dict[str, str] = {}
+    for bvid, sent_date in existing.items():
+        try:
+            if datetime.fromisoformat(str(sent_date)).date() >= cutoff:
+                kept[str(bvid)] = str(sent_date)
+        except ValueError:
+            continue
+    kept.update({video.bvid: today for video in videos})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"videos": kept}, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def select_bilibili_videos(
+    up_name: str,
+    rows: list[dict[str, Any]],
+    sent_bvids: set[str],
+    now: datetime | None = None,
+) -> list[BilibiliVideo]:
+    """只保留北京时间今天或昨天发布、尚未推送的视频。"""
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo(BEIJING_TIMEZONE)
+    current = (now.astimezone(zone) if now else datetime.now(zone))
+    earliest = current.date() - timedelta(days=1)
+    selected: list[BilibiliVideo] = []
+    for row in rows:
+        try:
+            bvid = str(row.get("bvid", "")).strip()
+            title = plain_text(str(row.get("title", "")))
+            published_at = datetime.fromtimestamp(int(row.get("created", 0)), zone)
+        except (TypeError, ValueError, OSError):
+            continue
+        if not bvid or not title or bvid in sent_bvids:
+            continue
+        if not (earliest <= published_at.date() <= current.date()) or published_at > current:
+            continue
+        selected.append(BilibiliVideo(up_name, title, bvid, f"https://www.bilibili.com/video/{bvid}", published_at))
+    return sorted(selected, key=lambda video: video.published_at, reverse=True)[:BILIBILI_MAX_PER_UP]
+
+
+def fetch_bilibili_news_videos(now: datetime | None = None) -> list[BilibiliVideo]:
+    """通过 bilibili-api-python 获取指定新闻 UP 的最新视频。"""
+    try:
+        import asyncio
+        from bilibili_api import Credential, search, user
+    except ImportError:
+        logging.warning("未安装 bilibili-api-python，跳过 B 站新闻视频")
+        return []
+
+    sent_bvids = load_sent_bilibili_videos()
+    sessdata = os.getenv("BILIBILI_SESSDATA", "").strip()
+    credential = Credential(sessdata=sessdata) if sessdata else None
+
+    async def collect() -> list[BilibiliVideo]:
+        videos: list[BilibiliVideo] = []
+        for index, up_name in enumerate(BILIBILI_NEWS_UPS):
+            # B 站对连续的公开接口请求会触发 412，账号之间主动留出缓冲。
+            if index:
+                await asyncio.sleep(2)
+            try:
+                result = await search.search_by_type(up_name, search.SearchObjectType.USER, page=1, page_size=20)
+                candidates = result.get("result", []) if isinstance(result, dict) else []
+                account = next((row for row in candidates if plain_text(str(row.get("uname", ""))) == up_name), None)
+                if not account or not account.get("mid"):
+                    logging.warning("未找到指定 B 站 UP：%s", up_name)
+                    continue
+                payload = await user.User(int(account["mid"]), credential=credential).get_videos(ps=30)
+                rows = payload.get("list", {}).get("vlist", []) if isinstance(payload, dict) else []
+                chosen = select_bilibili_videos(up_name, rows, sent_bvids, now)
+                videos.extend(chosen)
+                logging.info("B站视频：%s，入选 %d 条", up_name, len(chosen))
+            except Exception as exc:  # noqa: BLE001 - 单个 UP 失败不影响日报
+                logging.warning("B站视频抓取失败：%s，%s", up_name, str(exc).splitlines()[0][:200])
+        return videos
+
+    try:
+        return asyncio.run(collect())
+    except RuntimeError as exc:
+        logging.warning("B站视频异步任务无法启动：%s", exc)
+        return []
 
 
 def fetch_newsnow_platform(
@@ -631,7 +750,14 @@ def hot_topic_note(name: str) -> str:
     return "点击标题查看微博实时讨论" if name == "微博热搜" else "点击标题查看B站实时讨论"
 
 
-def render_html(date_text: str, sections: dict[str, list[NewsItem]], hot_words: dict[str, list[HotTopic | str]], page_url: str, geo_briefs: list[GeoBrief] | None = None) -> str:
+def render_html(
+    date_text: str,
+    sections: dict[str, list[NewsItem]],
+    hot_words: dict[str, list[HotTopic | str]],
+    page_url: str,
+    geo_briefs: list[GeoBrief] | None = None,
+    bilibili_videos: list[BilibiliVideo] | None = None,
+) -> str:
     blocks, number, seen_images = [], 0, set()
     for section in SECTION_LIMITS:
         cards = []
@@ -660,7 +786,14 @@ def render_html(date_text: str, sections: dict[str, list[NewsItem]], hot_words: 
         for index, brief in enumerate(geo_briefs or [], 1)
     )
     geo_section = f'<section id="geopolitics"><h2>地缘政治简报</h2>{geo}</section>' if geo else ""
-    return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>今日新闻杂志 {date_text}</title><style>body{{margin:0;background:#f6f5f1;color:#272727;font:17px/1.75 system-ui,"Microsoft YaHei",sans-serif}}main{{max-width:760px;margin:auto;padding:18px}}header,section,footer{{background:#fff;border-radius:12px;padding:18px;margin:14px 0;box-shadow:0 1px 4px #ddd}}h1{{font-size:27px;margin:0}}h2{{font-size:22px;border-left:5px solid #a6412e;padding-left:10px}}h3{{font-size:19px;margin-bottom:4px}}article{{border-top:1px solid #e8e4dc;padding:12px 0}}.news-image{{width:100%;max-height:280px;object-fit:cover;border-radius:8px;margin:8px 0;object-fit:cover}}.article-gallery{{margin-top:14px}}.article-gallery .news-image{{display:block}}.meta{{color:#666;font-size:15px}}summary{{color:#8b3828;font-weight:600;cursor:pointer}}a{{color:#8b3828}}details p{{white-space:pre-wrap}}.hot-list{{margin:0;padding-left:1.6em}}.hot-list li{{padding:4px 0}}.hot-note{{font-size:15px;color:#666;margin:4px 0 16px}}.geo-item{{padding:20px 0}}.geo-item h3{{font-size:21px;margin:0 0 12px}}.geo-points{{margin:0;padding-left:1.35em}}.geo-points li{{padding:4px 0 4px 8px}}.geo-points b{{font-weight:750}}footer{{font-size:15px;color:#555}}</style><main><header><h1>今日新闻杂志</h1><p>{html.escape(date_text)}</p></header>{geo_section}{''.join(blocks)}<section><h2>今日热搜</h2>{hot}</section><footer>新闻内容由公开 RSS 与原文整理而成，供阅读参考；请以原始报道为准。网页版入口：{html.escape(page_url)}</footer></main></html>'''
+    video_cards = "".join(
+        f'<article class="bilibili-video"><h3>{html.escape(video.source)}｜{html.escape(video.title)}</h3>'
+        f'<p class="meta">发布时间：{html.escape(video.published_at.strftime("%Y-%m-%d %H:%M"))}</p>'
+        f'<p><a href="{html.escape(video.url, quote=True)}" target="_blank" rel="noopener">打开 B 站观看</a></p></article>'
+        for video in bilibili_videos or []
+    )
+    video_section = f'<section id="bilibili-videos"><h2>B站新闻视频</h2>{video_cards}</section>' if video_cards else ""
+    return f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>今日新闻杂志 {date_text}</title><style>body{{margin:0;background:#f6f5f1;color:#272727;font:17px/1.75 system-ui,"Microsoft YaHei",sans-serif}}main{{max-width:760px;margin:auto;padding:18px}}header,section,footer{{background:#fff;border-radius:12px;padding:18px;margin:14px 0;box-shadow:0 1px 4px #ddd}}h1{{font-size:27px;margin:0}}h2{{font-size:22px;border-left:5px solid #a6412e;padding-left:10px}}h3{{font-size:19px;margin-bottom:4px}}article{{border-top:1px solid #e8e4dc;padding:12px 0}}.news-image{{width:100%;max-height:280px;object-fit:cover;border-radius:8px;margin:8px 0;object-fit:cover}}.article-gallery{{margin-top:14px}}.article-gallery .news-image{{display:block}}.meta{{color:#666;font-size:15px}}summary{{color:#8b3828;font-weight:600;cursor:pointer}}a{{color:#8b3828}}details p{{white-space:pre-wrap}}.hot-list{{margin:0;padding-left:1.6em}}.hot-list li{{padding:4px 0}}.hot-note{{font-size:15px;color:#666;margin:4px 0 16px}}.geo-item{{padding:20px 0}}.geo-item h3{{font-size:21px;margin:0 0 12px}}.geo-points{{margin:0;padding-left:1.35em}}.geo-points li{{padding:4px 0 4px 8px}}.geo-points b{{font-weight:750}}.bilibili-video{{padding:14px 0}}footer{{font-size:15px;color:#555}}</style><main><header><h1>今日新闻杂志</h1><p>{html.escape(date_text)}</p></header>{geo_section}{video_section}{''.join(blocks)}<section><h2>今日热搜</h2>{hot}</section><footer>新闻内容由公开 RSS 与原文整理而成，供阅读参考；请以原始报道为准。网页版入口：{html.escape(page_url)}</footer></main></html>'''
 
 
 def split_markdown(text: str, limit: int = 4096) -> list[str]:
@@ -681,7 +814,14 @@ def split_markdown(text: str, limit: int = 4096) -> list[str]:
     return chunks or [""]
 
 
-def build_wechat_messages(date_text: str, sections: dict[str, list[NewsItem]], hot_words: dict[str, list[HotTopic | str]], page_url: str, geo_briefs: list[GeoBrief] | None = None) -> list[str]:
+def build_wechat_messages(
+    date_text: str,
+    sections: dict[str, list[NewsItem]],
+    hot_words: dict[str, list[HotTopic | str]],
+    page_url: str,
+    geo_briefs: list[GeoBrief] | None = None,
+    bilibili_videos: list[BilibiliVideo] | None = None,
+) -> list[str]:
     messages, number = [], 0
     if geo_briefs:
         geo_lines = [f"## 地缘政治简报｜{date_text}"]
@@ -706,17 +846,33 @@ def build_wechat_messages(date_text: str, sections: dict[str, list[NewsItem]], h
         hot_lines.append(hot_topic_note(name))
     hot = "\n".join(hot_lines)
     messages.extend(split_markdown(hot))
+    if bilibili_videos:
+        video_lines = [f"## B站新闻视频｜{date_text}"]
+        for video in bilibili_videos:
+            video_lines.extend(
+                [
+                    f"**{video.source}｜{video.title}**",
+                    f"发布时间：{video.published_at.strftime('%Y-%m-%d %H:%M')}",
+                    f"[观看视频]({video.url})",
+                    "",
+                ]
+            )
+        video_lines.append(f"[打开网页视频列表]({page_url}/news/{date_text}.html#bilibili-videos)")
+        messages.extend(split_markdown("\n".join(video_lines)))
     messages.extend(split_markdown(f"## 来源与网页版\n新闻来自新华社、BBC中文、36氪、新浪财经和新浪娱乐等公开 RSS；内容经整理，原文链接可核对。\n[打开今日新闻杂志]({page_url}/news/{date_text}.html)"))
     return messages
 
 
-def send_wechat_messages(session: requests.Session, webhook_url: str, messages: list[str]) -> None:
+def send_wechat_messages(session: requests.Session, webhook_url: str, messages: list[str]) -> bool:
+    success = True
     for message in messages:
         try:
             response = session.post(webhook_url, json={"msgtype": "markdown", "markdown": {"content": message}}, timeout=20)
             response.raise_for_status()
         except Exception as exc:  # noqa: BLE001
             logging.warning("企业微信推送失败：%s", exc)
+            success = False
+    return success
 
 
 def main() -> None:
@@ -726,6 +882,7 @@ def main() -> None:
         return
     session = requests.Session()
     today = beijing_today()
+    bilibili_videos = fetch_bilibili_news_videos()
     rss_items = [extract_article(item) for item in fetch_rss_sources(session)]
     finance_items = fetch_newsnow_platform(session, "wallstreetcn-hot", "华尔街见闻", "wallstreetcn.com", "金融财经")
     finance_items += fetch_newsnow_platform(session, "cls-hot", "财联社", "cls.cn", "金融财经")
@@ -743,8 +900,18 @@ def main() -> None:
     for items in sections.values():
         for item in items:
             cache_article_images(session, item, image_dir)
-    (output / f"{today}.html").write_text(render_html(today, sections, hot_words, config.page_url, geo_briefs), encoding="utf-8")
-    send_wechat_messages(session, config.webhook_url, build_wechat_messages(today, sections, hot_words, config.page_url, geo_briefs))
+    (output / f"{today}.html").write_text(
+        render_html(today, sections, hot_words, config.page_url, geo_briefs, bilibili_videos), encoding="utf-8"
+    )
+    pushed = send_wechat_messages(
+        session,
+        config.webhook_url,
+        build_wechat_messages(today, sections, hot_words, config.page_url, geo_briefs, bilibili_videos),
+    )
+    if pushed and bilibili_videos:
+        record_sent_bilibili_videos(SENT_BILIBILI_VIDEOS_PATH, bilibili_videos, today)
+    elif bilibili_videos:
+        logging.warning("企业微信未全部推送成功，本次 B站视频不会记为已推送")
     logging.info("日报完成：%s，入选 %d 条", today, sum(len(value) for value in sections.values()))
 
 
