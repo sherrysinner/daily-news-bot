@@ -60,6 +60,15 @@ def test_bilibili_videos_render_embedded_player_and_use_it_in_wechat() -> None:
     messages = build_wechat_messages("2026-07-28", {}, {}, "https://example.test", bilibili_videos=[video])
 
     assert 'src="https://player.bilibili.com/player.html?bvid=BVnew&amp;page=1&amp;high_quality=1&amp;danmaku=0"' in page
-    assert 'allowfullscreen' in page
+    assert 'allowfullscreen="true"' in page
+    assert 'webkitallowfullscreen="true"' in page
+    assert 'mozallowfullscreen="true"' in page
     assert '打开 B站原页面' in page
     assert "[观看视频](https://player.bilibili.com/player.html?bvid=BVnew&page=1&high_quality=1&danmaku=0)" in "\n".join(messages)
+    assert 'class="bilibili-expand"' in page
+    assert 'data-player-url="https://player.bilibili.com/player.html?bvid=BVnew&amp;page=1&amp;high_quality=1&amp;danmaku=0"' in page
+    assert '放大播放' in page
+    assert 'id="bilibili-overlay"' in page
+    assert 'id="bilibili-overlay-frame"' in page
+    assert 'overlay.classList.add("is-open")' in page
+    assert 'overlayFrame.src = ""' in page
