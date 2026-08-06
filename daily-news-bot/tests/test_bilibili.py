@@ -64,7 +64,8 @@ def test_bilibili_videos_render_embedded_player_and_use_it_in_wechat() -> None:
     assert 'webkitallowfullscreen="true"' in page
     assert 'mozallowfullscreen="true"' in page
     assert '打开 B站原页面' in page
-    assert "[观看视频](https://player.bilibili.com/player.html?bvid=BVnew&page=1&high_quality=1&danmaku=0)" in "\n".join(messages)
+    assert "央视新闻｜测试视频" in "\n".join(messages)
+    assert "[打开网页视频列表](https://example.test/news/2026-07-28.html#bilibili-videos)" in "\n".join(messages)
     assert 'class="bilibili-expand"' in page
     assert 'data-player-url="https://player.bilibili.com/player.html?bvid=BVnew&amp;page=1&amp;high_quality=1&amp;danmaku=0"' in page
     assert '放大播放' in page

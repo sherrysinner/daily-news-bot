@@ -31,9 +31,24 @@ RSS_SOURCES = {
     "金融财经": [("中新网财经", "https://www.chinanews.com.cn/rss/finance.xml")],
     "娱乐体育": [("中新网文娱", "https://www.chinanews.com.cn/rss/culture.xml"), ("中新网体育", "https://www.chinanews.com.cn/rss/sports.xml")],
 }
+WEB_LIST_SOURCES = {
+    "文娱人物与行业": [
+        ("澎湃新闻·有戏", "https://m.thepaper.cn/channel_25953", "主流媒体"),
+        ("中新网文娱", "https://www.chinanews.com.cn/cul/", "主流媒体"),
+    ],
+    "财会审计与法律更新": [
+        ("国家法律法规数据库", "https://flk.npc.gov.cn/", "官方法规"),
+        ("司法部行政法规库", "https://xzfg.moj.gov.cn/", "官方法规"),
+        ("最高人民法院", "https://gongbao.court.gov.cn/ArticleList.html?serial_no=sfjs", "官方司法解释"),
+        ("财政部会计司", "https://kjs.mof.gov.cn/", "官方会计"),
+        ("审计署", "https://www.audit.gov.cn/", "官方审计"),
+        ("中国注册会计师协会", "https://www.cicpa.org.cn/xxfb/tzgg/", "官方审计"),
+        ("国家税务总局", "https://fgk.chinatax.gov.cn/zcfgk/index.html", "官方税收"),
+    ],
+}
 T2S_CONVERTER = OpenCC("t2s")
 HOT_URLS = {"微博热搜": "https://tenapi.cn/v2/weibohot", "小红书热搜": "https://tenapi.cn/v2/xiaohongshuhot"}
-SECTION_LIMITS = {"国内外要闻": 8, "科技": 4, "金融财经": 4, "娱乐体育": 4}
+SECTION_LIMITS = {"国内外要闻": 8, "科技": 4, "金融财经": 4, "娱乐体育": 4, "文娱人物与行业": 3, "财会审计与法律更新": 4}
 MAX_ITEMS_PER_SOURCE = 3
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 WALLSTREETCN_URL = "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=30"
@@ -57,6 +72,7 @@ class NewsItem:
     section: str = ""
     image_url: str = ""
     image_urls: list[str] = field(default_factory=list)
+    source_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -144,6 +160,33 @@ def fetch_rss_sources(session: requests.Session) -> list[NewsItem]:
                 logging.info("RSS 成功：%s，共 %d 条", source, len(feed.entries))
             except Exception as exc:  # noqa: BLE001 - 网络源必须隔离错误
                 logging.warning("RSS 抓取失败：%s，%s", source, exc)
+    return items
+
+
+def fetch_web_list_sources(session: requests.Session) -> list[NewsItem]:
+    """从可信网站列表页提取候选标题；网页变动时安全跳过该来源。"""
+    items, seen = [], set()
+    for section, sources in WEB_LIST_SOURCES.items():
+        for source, page_url, source_type in sources:
+            try:
+                response = session.get(page_url, timeout=20, headers={"User-Agent": "daily-news-bot/1.0"})
+                response.raise_for_status()
+                document = lxml_html.fromstring(response.text)
+                for anchor in document.xpath("//a[@href]"):
+                    title = to_simplified(plain_text(anchor.text_content()))
+                    url = urljoin(page_url, anchor.get("href", "").strip())
+                    if len(title) < 8 or not url.startswith(("http://", "https://")):
+                        continue
+                    key = (title, canonical_url(url))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    items.append(NewsItem(title, source, url, title, "", section=section, source_type=source_type))
+                    if sum(item.source == source for item in items) >= 20:
+                        break
+                logging.info("网页来源成功：%s", source)
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("网页来源抓取失败：%s，%s", source, exc)
     return items
 
 
@@ -552,11 +595,16 @@ def call_deepseek(session: requests.Session, messages: list[dict[str, str]], api
         return None
 
 
+def build_selection_prompt() -> str:
+    """生成严格、可审计的第一轮新闻筛选规则。"""
+    return """你是严谨的中文报纸编辑。按国内外要闻、科技、金融财经、娱乐体育、文娱人物与行业、财会审计与法律更新筛选新闻；过滤标题党、无实质内容和传播健康焦虑的信息。只根据输入，不得编造。文娱人物与行业仅选择艺人、制作方或平台正式公告、公开活动、作品项目、奖项、主流媒体交叉确认的公共事件；排除未经证实的传闻、营销号、恋情婚变猜测、隐私内容和所谓知情人爆料。财会审计与法律更新只选择官方法规、官方司法解释、官方会计审计税收监管或可回链一手文件；官方案例必须标注为官方案例。返回 JSON 对象，键为六个板块，值为输入中 url 组成的数组。国内外要闻最多8条，科技、金融财经、娱乐体育最多4条，文娱人物与行业最多3条，财会审计与法律更新最多4条。"""
+
+
 def ai_select(items: list[NewsItem], session: requests.Session, api_key: str) -> dict[str, list[NewsItem]]:
     index = {item.url: item for item in items}
     candidates_by_section = {section: [item for item in items if item.section == section] for section in SECTION_LIMITS}
-    catalogue = [{"title": i.title, "source": i.source, "url": i.url, "description": i.description, "suggested_section": i.section} for i in items]
-    prompt = """你是严谨的中文报纸编辑。按国内外要闻、科技、金融财经、娱乐体育筛选新闻；过滤标题党、无实质内容和传播健康焦虑的信息。只根据输入，不得编造。返回 JSON 对象，键为四个板块，值为输入中 url 组成的数组。国内外要闻最多8条，其余最多4条。"""
+    catalogue = [{"title": i.title, "source": i.source, "source_type": i.source_type, "url": i.url, "description": i.description, "suggested_section": i.section} for i in items]
+    prompt = build_selection_prompt()
     result = call_deepseek(session, [{"role": "system", "content": prompt}, {"role": "user", "content": json.dumps(catalogue, ensure_ascii=False)}], api_key)
     if not result:
         return fill_section_gaps(fallback_select(items), candidates_by_section)
@@ -777,7 +825,8 @@ def render_html(
             cover = images[0] if images else ""
             gallery = f'<div class="article-gallery">{"".join(images[1:])}</div>' if len(images) > 1 else ""
             cards.append(f'<article id="news-{number}"><h3>{html.escape(item.title)}</h3><p class="meta">来源：{html.escape(item.source)}</p><p>{html.escape(item.summary)}</p>{cover}<details><summary>点击展开新闻整理</summary>{"".join(paragraph_parts)}{gallery}<p><a href="{html.escape(item.url, quote=True)}" target="_blank" rel="noopener">阅读原文</a></p></details></article>')
-        blocks.append(f"<section><h2>{section}</h2>{''.join(cards) or '<p>今日暂未获取到合适新闻。</p>'}</section>")
+        empty_text = "今日暂无符合筛选规则的可靠更新。" if section in {"文娱人物与行业", "财会审计与法律更新"} else "今日暂未获取到合适新闻。"
+        blocks.append(f"<section><h2>{section}</h2>{''.join(cards) or f'<p>{empty_text}</p>'}</section>")
     hot = "".join(
         f"<h3>{html.escape(name)}</h3><ol class=\"hot-list\">"
         f"{''.join(render_hot_topic(topic) for topic in words) or '<li>暂无数据</li>'}</ol><p class=\"hot-note\">{hot_topic_note(name)}</p>"
@@ -836,16 +885,16 @@ def build_wechat_messages(
 ) -> list[str]:
     messages, number = [], 0
     if geo_briefs:
-        geo_lines = [f"## 地缘政治简报｜{date_text}"]
-        for index, brief in enumerate(geo_briefs, 1):
-            geo_lines.extend([f"**{index}. {brief.title}**", f"• **事件概述：**{brief.event}", f"• **影响分析：**{brief.impact}", f"• **后续关注：**{brief.watch}", ""])
-        geo_lines.append(f"[打开网页版简报]({page_url}/news/{date_text}.html#geopolitics)")
+        geo_lines = [f"## 地缘政治简报｜{date_text}", f"[打开三条地缘政治简报]({page_url}/news/{date_text}.html#geopolitics)"]
         messages.extend(split_markdown("\n".join(geo_lines)))
     for section in SECTION_LIMITS:
+        section_items = sections.get(section, [])
+        if not section_items:
+            continue
         lines = [f"## {section}｜{date_text}"]
-        for item in sections.get(section, []):
+        for item in section_items:
             number += 1
-            lines.extend([f"**{item.title}**", item.summary, f"[阅读全文]({page_url}/news/{date_text}.html#news-{number})", ""])
+            lines.append(f"- [{item.title}]({page_url}/news/{date_text}.html#news-{number})")
         messages.extend(split_markdown("\n".join(lines)))
     hot_lines = [f"## 今日热搜｜{date_text}"]
     for name, words in hot_words.items():
@@ -861,17 +910,10 @@ def build_wechat_messages(
     if bilibili_videos:
         video_lines = [f"## B站新闻视频｜{date_text}"]
         for video in bilibili_videos:
-            video_lines.extend(
-                [
-                    f"**{video.source}｜{video.title}**",
-                    f"发布时间：{video.published_at.strftime('%Y-%m-%d %H:%M')}",
-                    f"[观看视频]({bilibili_player_url(video.bvid)})",
-                    "",
-                ]
-            )
+            video_lines.append(f"- {video.source}｜{video.title}")
         video_lines.append(f"[打开网页视频列表]({page_url}/news/{date_text}.html#bilibili-videos)")
         messages.extend(split_markdown("\n".join(video_lines)))
-    messages.extend(split_markdown(f"## 来源与网页版\n新闻来自新华社、BBC中文、36氪、新浪财经和新浪娱乐等公开 RSS；内容经整理，原文链接可核对。\n[打开今日新闻杂志]({page_url}/news/{date_text}.html)"))
+    messages.extend(split_markdown(f"## 来源与网页版\n新闻来自公开 RSS、主流媒体文娱栏目及政府和行业机构公开页面；内容经整理，原文链接可核对。\n[打开今日新闻杂志]({page_url}/news/{date_text}.html)"))
     return messages
 
 
@@ -898,7 +940,8 @@ def main() -> None:
     rss_items = [extract_article(item) for item in fetch_rss_sources(session)]
     finance_items = fetch_newsnow_platform(session, "wallstreetcn-hot", "华尔街见闻", "wallstreetcn.com", "金融财经")
     finance_items += fetch_newsnow_platform(session, "cls-hot", "财联社", "cls.cn", "金融财经")
-    items = rss_items + finance_items
+    trusted_web_items = fetch_web_list_sources(session)
+    items = rss_items + finance_items + trusted_web_items
     sections = ai_select(items, session, config.deepseek_api_key)
     ai_enrich(sections, session, config.deepseek_api_key)
     geo_briefs = ai_geopolitical_brief(sections, session, config.deepseek_api_key)
