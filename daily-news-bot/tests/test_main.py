@@ -7,6 +7,8 @@ from PIL import Image
 
 from main import (
     RSS_SOURCES,
+    SECTION_LIMITS,
+    WEB_LIST_SOURCES,
     WALLSTREETCN_URL,
     NewsItem,
     HotTopic,
@@ -25,6 +27,8 @@ from main import (
     fetch_newsnow_hot_topics,
     hot_topic_note,
     fetch_newsnow_platform,
+    fetch_web_list_sources,
+    build_selection_prompt,
     is_valid_article,
     is_valid_summary,
     normalize_article_paragraphs,
@@ -35,6 +39,51 @@ from main import (
     split_markdown,
     to_simplified,
 )
+
+
+def test_wechat_news_sections_are_title_only_links():
+    item = NewsItem(
+        "科技标题", "测试来源", "https://example.test/news", "简介", "正文",
+        summary="这段摘要只能留在网页中，企业微信目录不应显示它。", section="科技",
+    )
+    messages = build_wechat_messages("2026-08-06", {"科技": [item]}, {}, "https://pages.example")
+    joined = "\n".join(messages)
+    assert "[科技标题](https://pages.example/news/2026-08-06.html#news-1)" in joined
+    assert "这段摘要只能留在网页中" not in joined
+    assert "阅读全文" not in joined
+
+
+def test_section_limits_include_trusted_entertainment_and_professional_news():
+    assert SECTION_LIMITS["文娱人物与行业"] == 3
+    assert SECTION_LIMITS["财会审计与法律更新"] == 4
+
+
+def test_selection_prompt_rejects_unverified_entertainment_and_requires_official_sources():
+    prompt = build_selection_prompt()
+    assert "未经证实的传闻" in prompt
+    assert "官方法规" in prompt
+    assert "财会审计与法律更新" in prompt
+
+
+def test_web_list_sources_adds_trusted_item_with_source_type(monkeypatch):
+    class HtmlResponse:
+        content = '<html><a href="/document/1">2026年会计准则实施问答</a></html>'.encode("utf-8")
+        text = '<html><a href="/document/1">2026年会计准则实施问答</a></html>'
+
+        def raise_for_status(self):
+            return None
+
+    class HtmlSession:
+        def get(self, *_args, **_kwargs):
+            return HtmlResponse()
+
+    monkeypatch.setattr(main_module, "WEB_LIST_SOURCES", {
+        "财会审计与法律更新": [("财政部会计司", "https://kjs.example", "官方会计")]
+    })
+    items = fetch_web_list_sources(HtmlSession())
+    assert [(item.title, item.url, item.section, item.source_type) for item in items] == [
+        ("2026年会计准则实施问答", "https://kjs.example/document/1", "财会审计与法律更新", "官方会计")
+    ]
 
 
 def test_html_escapes_content_and_has_collapsible_article():
